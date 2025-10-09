@@ -15,6 +15,7 @@ from datetime import date, datetime
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
 from tkinter import font as tkfont
+from ATP_beta6_v2_patch import apply_light_theme
 
 try:
     import pandas as pd
@@ -421,6 +422,8 @@ class App(tk.Tk):
         self.base_font.configure(size=self.base_font_size, family="Segoe UI")
 
         style = ttk.Style(self)
+        apply_light_theme(style)  # 🎨 activate modern light mode
+
         style.configure("Treeview", rowheight=32, font=self.base_font, padding=4)
         style.configure("Treeview.Heading", font=(self.base_font.actual("family"), self.base_font_size, "bold"), padding=(6,4))
         style.map('Treeview', background=[('selected', '#cde1ff')])
