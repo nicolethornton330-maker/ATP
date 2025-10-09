@@ -4,7 +4,7 @@
 Attendance Points Tracker — Admin HR Beta 6 (Patch 2 Final)
 - Sidebar back to light background with dark readable text (hover tint #dfe2e8).
 - Two-zone sidebar layout (top nav + bottom logo/caption) so it never collapses.
-- Auto-scaling logo at bottom-left with "APT" caption, ~20px above bottom edge.
+- Auto-scaling logo at bottom-left with "ATP" caption, ~20px above bottom edge.
 - Silent autosave UX: no pop-up confirmations for routine edits/adds; instead a small green
   ✓ Saved label appears bottom-right for ~2 seconds after successful commits.
 - All Beta 6 features preserved: inline editing, manual override, search/filters, column DnD,
@@ -502,7 +502,7 @@ class App(tk.Tk):
                 tk.Label(self.nav_footer, image=self.logo_img, bg=self.sidebar_bg).pack(side="left", anchor="s", padx=(0,6))
         except Exception:
             self.logo_img = None
-        tk.Label(self.nav_footer, text="APT", fg=self.sidebar_fg, bg=self.sidebar_bg, font=("Segoe UI", 12, "bold")).pack(side="left", anchor="s", pady=(8,0))
+        tk.Label(self.nav_footer, text="ATP", fg=self.sidebar_fg, bg=self.sidebar_bg, font=("Segoe UI", 12, "bold")).pack(side="left", anchor="s", pady=(8,0))
 
         # ---- Main content (ttk for native look) ----
         self.content = ttk.Frame(self, padding=8)
@@ -564,7 +564,7 @@ class DashboardFrame(ttk.Frame):
         left = ttk.Frame(top); left.grid(row=0, column=0, sticky="w")
         ttk.Label(left, text="Show:").pack(side="left")
         self.filter_var = tk.StringVar(value="All")
-        self.filter_box = ttk.Combobox(left, textvariable=self.filter_var, values=["All","Perfect Attendance","Warning","Critical","Termination"],
+        self.filter_box = ttk.Combobox(left, textvariable=self.filter_var, values=["All","Safe","Warning","Critical","Termination"],
                                        width=22, state="readonly")
         self.filter_box.pack(side="left", padx=6)
         ttk.Button(left, text="🔄 Refresh", command=self.refresh).pack(side="left", padx=6)
@@ -613,7 +613,7 @@ class DashboardFrame(ttk.Frame):
         rows = []
         for emp_id, ln, fn, total, lpd, rd, pb, pwd in cur.fetchall():
             if total == 0:
-                status = "✅ Perfect Attendance"
+                status = "✅ Safe"
             elif 5 <= total <= 6:
                 status = "⚠️ Warning"
             elif total >= 8.0:
@@ -635,7 +635,7 @@ class DashboardFrame(ttk.Frame):
         f = self.filter_var.get()
         if f != "All":
             mapping = {
-                "Perfect Attendance": "✅ Perfect Attendance",
+                "Safe": "✅ Safe",
                 "Warning": "⚠️ Warning",
                 "Critical": "🚫 Critical",
                 "Termination": "🚫 TERMINATION LEVEL",
