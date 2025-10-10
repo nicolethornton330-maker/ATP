@@ -22,3 +22,4 @@ When adding points, the point date field should be blank by default
 ===========================
 BUG FIXES
 ===========================
+Sort feature on the dashboard does not work
