@@ -13,7 +13,7 @@ FUNCTIONALITY IMPROVEMENTS
 Ability to live-edit the tables as needed in all fields
 Auto-populate the perfect attendance date when a new employee is entered.
 Ability to delete employees from the Employees tab
-
+Drop down menu in the Points tab to select reason : Tardy/Early Leave OR Absence
 ===========================
 BUG FIXES
 ===========================
