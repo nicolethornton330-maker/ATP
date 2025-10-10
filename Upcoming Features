@@ -1,0 +1,19 @@
+========================
+COSMETIC FIXES
+=======================
+Remove 2-Month Rolloff column from Dashboard
+Remove Perfect Attendance column from Dashboard
+Color code safe, warning and critical employees
+Add company logo on side banner
+Move tabs from a top menu to a side menu
+
+=============================
+FUNCTIONALITY IMPROVEMENTS
+=============================
+Ability to live-edit the tables as needed in all fields
+Auto-populate the perfect attendance date when a new employee is entered.
+Ability to delete employees from the Employees tab
+
+===========================
+BUG FIXES
+===========================
