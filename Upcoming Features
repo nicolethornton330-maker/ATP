@@ -10,8 +10,8 @@ Move tabs from a top menu to a side menu
 =============================
 FUNCTIONALITY IMPROVEMENTS
 =============================
-Ability to live-edit the tables as needed in all fields
-Auto-populate the perfect attendance date when a new employee is entered.
+Ability to live-edit the tables in the Employees as needed in all fields
+Ability to add the perfect attendance date when adding a new employee through the GUI.
 Ability to delete employees from the Employees tab
 Drop down menu in the Points tab to select reason : Tardy/Early Leave OR Absence
 Be able to 'tab' across field instead of clicking in each one
