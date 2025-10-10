@@ -26,6 +26,13 @@ STRIPE_ODD   = "#e0e6ed"
 ACCENT       = "#4c6faf"
 GREEN_OK     = "#2e7d32"
 
+STATUS_COLORS = {
+    "Safe": "#daf2d8",             # pale green
+    "Warning": "#fff7cc",          # pale yellow
+    "Critical": "#ffe2c4",         # pale orange
+    "Termination Risk": "#ffd6d6", # pale red
+}
+
 DB_PATH      = "attendance_MASTER.db"
 
 # ----------------------------
@@ -363,7 +370,7 @@ class DashboardFrame(ttk.Frame):
         ttk.Label(left, text="Show:").pack(side="left")
         self.filter_var = tk.StringVar(value="All")
         self.filter_box = ttk.Combobox(left, textvariable=self.filter_var,
-                                       values=["All","Safe","Warning","Critical","Termination"],
+                                       values=["All","Safe","Warning","Critical","Termination Risk"],
                                        width=22, state="readonly")
         self.filter_box.pack(side="left", padx=6)
         ttk.Button(left, text="🔄 Refresh", command=self.refresh).pack(side="left", padx=6)
@@ -376,9 +383,9 @@ class DashboardFrame(ttk.Frame):
         self.search_entry.bind("<KeyRelease>", lambda e: self.refresh())
 
         self.cols = ("employee_id","last_name","first_name","total",
-                     "last_point","rolloff_date","perfect_bonus","status","warning_date")
-        headers = ["ID","Last Name","First Name","Total Points","Last Point",
-                   "2-Month Rolloff","Perfect Attendance","Status","Point Warning Date"]
+                     "status","warning_date")
+        headers = ["ID","Last Name","First Name","Total Points",
+                   "Status","Point Warning Date"]
 
         frame = ttk.Frame(self, padding=(6,6,6,6), style="Pane.TFrame")
         frame.grid(row=2, column=0, sticky="nsew")
@@ -400,8 +407,10 @@ class DashboardFrame(ttk.Frame):
             if ccc == "employee_id": w = 100
             self.tree.column(ccc, width=w, anchor=("center" if ccc in ("employee_id","total","status") else "w"))
 
-        self.tree.tag_configure("even", background=self.app.strip_even)
-        self.tree.tag_configure("odd", background=self.app.strip_odd)
+        self.tree.tag_configure("status-safe", background=STATUS_COLORS["Safe"], foreground=TEXT_MAIN)
+        self.tree.tag_configure("status-warning", background=STATUS_COLORS["Warning"], foreground=TEXT_MAIN)
+        self.tree.tag_configure("status-critical", background=STATUS_COLORS["Critical"], foreground=TEXT_MAIN)
+        self.tree.tag_configure("status-termination", background=STATUS_COLORS["Termination Risk"], foreground=TEXT_MAIN)
 
         key_map = {h:k for h,k in zip(headers, self.cols)}
         self.sorter = SortableTree(self.tree, self.cols, key_map)
@@ -415,33 +424,28 @@ class DashboardFrame(ttk.Frame):
                    e.last_name,
                    e.first_name,
                    e.point_total,
-                   e.last_point_date,
-                   e.rolloff_date,
-                   e.perfect_attendance,
                    e.point_warning_date
               FROM employees e
           ORDER BY e.last_name, e.first_name;
         """)
         rows = []
-        for emp_id, ln, fn, total, lpd, rd, pb, pwd in cur.fetchall():
-            if not total or float(total) == 0:
-                status = "✅ Safe"
-            elif 5 <= float(total) <= 6:
-                status = "⚠️ Warning"
-            elif float(total) >= 8.0:
-                status = "🚫 TERMINATION LEVEL"
-            elif float(total) > 6:
-                status = "🚫 Critical"
+        for emp_id, ln, fn, total, pwd in cur.fetchall():
+            total_val = float(total or 0)
+            if total_val <= 3.5:
+                status = "Safe"
+            elif total_val >= 7.0:
+                status = "Termination Risk"
+            elif total_val >= 6.0:
+                status = "Critical"
+            elif total_val >= 4.0:
+                status = "Warning"
             else:
-                status = ""
+                status = "Safe"
             rows.append((
                 emp_id,
                 ln or "",
                 fn or "",
-                f"{float(total or 0):.1f}",
-                ymd_to_us(lpd),
-                ymd_to_us(rd),
-                ymd_to_us(pb),
+                f"{total_val:.1f}",
                 status,
                 ymd_to_us(pwd)
             ))
@@ -462,18 +466,24 @@ class DashboardFrame(ttk.Frame):
         f = self.filter_var.get()
         if f != "All":
             mapping = {
-                "Safe": "✅ Safe",
-                "Warning": "⚠️ Warning",
-                "Critical": "🚫 Critical",
-                "Termination": "🚫 TERMINATION LEVEL",
+                "Safe": "Safe",
+                "Warning": "Warning",
+                "Critical": "Critical",
+                "Termination Risk": "Termination Risk",
             }
             target = mapping.get(f, None)
             if target:
-                rows = [r for r in rows if r[7] == target]
+                rows = [r for r in rows if r[4] == target]
 
         for i, row in enumerate(rows):
-            tag = "even" if i % 2 == 0 else "odd"
-            self.tree.insert("", "end", values=row, tags=(tag,))
+            status_tag = {
+                "Safe": "status-safe",
+                "Warning": "status-warning",
+                "Critical": "status-critical",
+                "Termination Risk": "status-termination",
+            }.get(row[4], "")
+            tags = (status_tag,) if status_tag else ()
+            self.tree.insert("", "end", values=row, tags=tags)
 
 # ----------------------------
 # Add Points Tab
