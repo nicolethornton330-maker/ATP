@@ -1,25 +1,17 @@
 ========================
 COSMETIC FIXES
 =======================
-Remove 2-Month Rolloff column from Dashboard
-Remove Perfect Attendance column from Dashboard
-Color code safe, warning and critical employees
-Add company logo on side banner
 Move tabs from a top menu to a side menu
 
 =============================
 FUNCTIONALITY IMPROVEMENTS
 =============================
-Ability to live-edit the tables in the Employees as needed in all fields
-Ability to add the perfect attendance date when adding a new employee through the GUI.
-Ability to delete employees from the Employees tab
 Drop down menu in the Points tab to select reason : Tardy/Early Leave OR Absence
 Be able to 'tab' across field instead of clicking in each one
-All exports need to include Employee ID, Last Name, First Name, Point, Point Date, Reason, Note, Point Total, Flag Code
 When a point is removed, revert to previous last point date, 2 month rolloff date and perfect attendance
 When adding points, the point date field should be blank by default
 
 ===========================
 BUG FIXES
 ===========================
-Sort feature on the dashboard does not work
+
