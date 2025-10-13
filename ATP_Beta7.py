@@ -1202,7 +1202,7 @@ class AddPointsFrame(ttk.Frame):
         # Buttons
         actions = ttk.Frame(self, padding=(6,8,6,6))
         actions.grid(row=2, column=0, sticky="w")
-        self.btn_addpoint = ttk.Button(actions, text="Add Point (Ctrl+S)", command=self._add_point)
+        self.btn_addpoint = ttk.Button(actions, text="Add Point", command=self._add_point)
         self.btn_addpoint.pack(side="left", padx=4)
         ttk.Button(actions, text="Manage Points", command=self._open_manage_points).pack(side="left", padx=4)
         self.undo_btn = ttk.Button(actions, text="Undo (Ctrl+Z)", command=self._undo_point, state="disabled")
@@ -1484,39 +1484,93 @@ class ReportsFrame(ttk.Frame):
 
         self.columnconfigure(0, weight=1)
 
-        # Uniform button style (tweak padding if you like)
-        style = ttk.Style(self)
-        style.configure("Accent.TButton", padding=(10, 8))
+        # ----------------------------
+        # Compact, consistent button style
+        # ----------------------------
+        s = ttk.Style(self)
+        BTN_STYLE = "Toolbar.TButton"
+        s.configure(BTN_STYLE, padding=(10, 6), font=("Segoe UI", 9, "bold"))
+        # (Optional tint if you're on 'clam'/'alt'/'default' and want a subtle fill)
+        if s.theme_use() in ("clam", "alt", "default"):
+            s.configure(BTN_STYLE, relief="raised", borderwidth=1)
+            s.map(BTN_STYLE,
+                  relief=[("pressed", "sunken")])
 
-        box = ttk.Frame(self, padding=(10,10,10,10), style="Pane.TFrame")
-        box.grid(row=0, column=0, sticky="ew")
-        box.columnconfigure(0, weight=1)
+        # Small helper: resolve a command by name; warn if not found (prevents startup errors)
+        from tkinter import messagebox
+        def _safe_cmd(name):
+            return getattr(self, name, lambda: messagebox.showwarning(
+                "Not implemented", f"Method '{name}' is not defined yet.")
+            )
 
-        ttk.Label(box, text="Accent", style="Header.TLabel").grid(row=0, column=0, sticky="w", pady=(0,6))
+        # ----------------------------
+        # Layout containers
+        # ----------------------------
+        outer = ttk.Frame(self, padding=(10, 10, 10, 10), style="Pane.TFrame")
+        outer.grid(row=0, column=0, sticky="nsew")
+        outer.columnconfigure(0, weight=1)
 
-        ttk.Button(box, text="Export 2-Month Rolloffs (Ctrl+E)",
-                   style="Accent.TButton",
-                   command=self.export_rolloffs).grid(row=1, column=0, sticky="ew", pady=4)
+        # Top toolbar (right-aligned trio)
+        toolbar = ttk.Frame(outer)
+        toolbar.grid(row=0, column=0, sticky="e", pady=(0, 8))
+        for i in range(3):
+            toolbar.columnconfigure(i, weight=0)
 
-        ttk.Button(box, text="Export Perfect Attendance",
-                   style="Accent.TButton",
-                   command=self.export_perfect).grid(row=2, column=0, sticky="ew", pady=4)
+        # Button grid below (two neat columns, left-aligned)
+        gridbox = ttk.Frame(outer)
+        gridbox.grid(row=1, column=0, sticky="w")
+        gridbox.columnconfigure(0, weight=0)
+        gridbox.columnconfigure(1, weight=0)
 
-        ttk.Button(box, text="Export Point History",
-                   style="Accent.TButton",
-                   command=self.export_point_history).grid(row=3, column=0, sticky="ew", pady=4)
+        # Convenience creator
+        def BTN(parent, text, cmd, r=None, c=None):
+            b = ttk.Button(parent, text=text, style=BTN_STYLE, command=cmd, takefocus=True)
+            if r is None:
+                # allow toolbar pack via grid(...) outside
+                return b
+            b.grid(row=r, column=c, padx=6, pady=4, sticky="w")
+            return b
 
-        ttk.Button(box, text="2 Month Rolloff",
-                   style="Accent.TButton",
-                   command=self.auto_expire_points).grid(row=4, column=0, sticky="ew", pady=4)
+        # ----------------------------
+        # Toolbar buttons (new trio)
+        # ----------------------------
+        BTN(toolbar, "Export: Current Totals",
+            _safe_cmd("export_point_history_current_total")
+        ).grid(row=0, column=0, padx=(0, 6), sticky="e")
 
-        # NEW: keep this in the same container, same style, same grid
-        ttk.Button(box, text="Perfect Attendance Report",
-                   style="Accent.TButton",
-                   command=self.perfect_attendance_report).grid(row=5, column=0, sticky="ew", pady=4)
+        BTN(toolbar, "Export: Instance Totals",
+            lambda: _safe_cmd("export_point_history_instance_total")(True)
+        ).grid(row=0, column=1, padx=(0, 6), sticky="e")
 
-        ttk.Label(self, text="CSV files are saved in this program's folder.",
-                  foreground=TEXT_MUTED).grid(row=1, column=0, sticky="w", pady=(8,0))
+        BTN(toolbar, "Export: Both",
+            _safe_cmd("export_both_point_history_reports")
+        ).grid(row=0, column=2, sticky="e")
+
+        # ----------------------------
+        # Main grid buttons (2 columns)
+        #   Left column = preview/exports (no DB changes)
+        #   Right column = actions that update DB
+       
+        # ----------------------------
+
+        # PREVIEW/EXPORTS (no DB changes)
+        BTN(gridbox, "Preview: Upcoming 2-Month Rolloffs",
+            _safe_cmd("export_rolloffs"), r=0, c=0)
+
+        BTN(gridbox, "Preview: Upcoming Perfect Attendance",
+            _safe_cmd("export_perfect"), r=1, c=0)
+
+        # ACTIONS (mutate DB)
+        BTN(gridbox, "Run: Apply 2-Month Rolloffs",
+            _safe_cmd("auto_expire_points"), r=0, c=1)
+
+        BTN(gridbox, "Run: Perfect Attendance (Advance Dates)",
+            lambda: _safe_cmd("perfect_attendance_report")(date.today(), False), r=1, c=1)
+
+        # Optional: a safe simulation button (no DB writes)
+        BTN(gridbox, "Simulate: Perfect Attendance (No Changes)",
+            lambda: _safe_cmd("perfect_attendance_report")(date.today(), True), r=2, c=0)
+
 
     def _default_save_path(self, prefix: str) -> str:
         """Save to program directory."""
@@ -1630,7 +1684,7 @@ class ReportsFrame(ttk.Frame):
             with open(path, "w", newline="", encoding="utf-8") as f:
                 w = csv.writer(f)
                 w.writerow([
-                    "Employee ID",
+                    "Employee #",
                     "Last Name",
                     "First Name",
                     "Rolloff Date",
@@ -1678,7 +1732,7 @@ class ReportsFrame(ttk.Frame):
             w = csv.writer(f)
             # HRIS-aligned header order
             w.writerow([
-                "Employee ID",
+                "Employee #",
                 "Last Name",
                 "First Name",
                 "Rolloff Date",
@@ -1714,7 +1768,7 @@ class ReportsFrame(ttk.Frame):
             w = csv.writer(f)
             # HRIS-specific header order
             w.writerow([
-                "Employee ID",
+                "Employee #",
                 "Last Name",
                 "First Name",
                 "Perfect Attendance Date",
@@ -1737,9 +1791,17 @@ class ReportsFrame(ttk.Frame):
         self.app.set_status(f"Report exported - {os.path.basename(path)}", ok=True)
 
     def export_point_history(self):
+        # Make sure totals are up to date (runs your app's recalc/refresh if present)
+        try:
+            if hasattr(self.app, "_refresh_all"):
+                self.app._refresh_all()
+        except Exception:
+            pass
+
         rows = self.conn.execute("""
             SELECT p.id, e.employee_id, e.last_name, e.first_name,
-                   p.point_date, p.points, p.reason, p.note, p.flag_code
+                   p.point_date, p.points, p.reason, p.note, p.flag_code,
+                   COALESCE(e.point_total, 0.0) AS current_total
               FROM points_history p
               JOIN employees e ON e.employee_id = p.employee_id
           ORDER BY e.employee_id ASC, p.point_date ASC, p.id ASC;
@@ -1748,38 +1810,32 @@ class ReportsFrame(ttk.Frame):
         path = self._default_save_path("point_history_report")
         with open(path, "w", newline="", encoding="utf-8") as f:
             w = csv.writer(f)
-            w.writerow(["Entry ID", "Employee ID", "Last Name", "First Name", "Point Date", "Point", "Reason", "Note", "Flag Code", "Point Total"])
-
-            cumulative = {}  # running total per employee
+            # Live total from employees table
+            w.writerow([
+                "Entry ID", "Employee ID", "Last Name", "First Name",
+                "Point Date", "Point", "Reason", "Note", "Flag Code",
+                "Point Total (current)"
+            ])
 
             for r in rows:
-                emp_id = r["employee_id"]
                 pts = float(r["points"] or 0)
-
-                # initialize if first time seeing this employee
-                if emp_id not in cumulative:
-                    # start from zero before first entry
-                    cumulative[emp_id] = 0.0
-
-                # increment running total
-                cumulative[emp_id] += pts
-                point_total = cumulative[emp_id]
-
-                # write CSV row
                 w.writerow([
                     r["id"],
-                    emp_id,
+                    r["employee_id"],
                     r["last_name"],
                     r["first_name"],
-                    ymd_to_us(r["point_date"]),
+                    ymd_to_us(r["point_date"]),      # assumes you have this helper
                     f"{pts:.1f}",
                     r["reason"] or "",
                     r["note"] or "",
                     r["flag_code"] or "",
-                    f"{point_total:.1f}"
+                    f"{float(r['current_total']):.1f}",
                 ])
 
-        self.app.set_status(f"Report exported - {os.path.basename(path)}", ok=True)
+        if hasattr(self.app, "set_status"):
+            self.app.set_status(f"Report exported - {os.path.basename(path)}", ok=True)
+
+        
     def perfect_attendance_report(self, as_of=None, dry_run=False):
         """
         Export a CSV of all employees whose perfect_attendance date is due on or before `as_of`
@@ -1888,6 +1944,138 @@ class ReportsFrame(ttk.Frame):
             self.app._refresh_all()
         except Exception:
             pass
+
+    def export_point_history_current_total(self):
+        """
+        Exports history with the live total from employees.point_total on every row.
+        Useful for auditing what the app currently believes after rolloffs/edits.
+        """
+        # Keep totals fresh for the "current_total" column
+        try:
+            if hasattr(self.app, "_refresh_all"):
+                self.app._refresh_all()
+        except Exception:
+            pass
+
+        rows = self.conn.execute("""
+            SELECT p.id, e.employee_id, e.last_name, e.first_name,
+                   p.point_date, p.points, p.reason, p.note, p.flag_code,
+                   COALESCE(e.point_total, 0.0) AS current_total
+              FROM points_history p
+              JOIN employees e ON e.employee_id = p.employee_id
+          ORDER BY e.employee_id ASC, p.point_date ASC, p.id ASC;
+        """).fetchall()
+
+        path = self._default_save_path("point_history_report")  # e.g., YYYYMMDD_point_history_report.csv
+        with open(path, "w", newline="", encoding="utf-8") as f:
+            w = csv.writer(f)
+            w.writerow([
+                "Entry ID","Employee ID","Last Name","First Name",
+                "Point Date","Point","Reason","Note","Flag Code",
+                "Point Total (current)"
+            ])
+            for r in rows:
+                pts = float(r["points"] or 0)
+                w.writerow([
+                    r["id"],
+                    r["employee_id"],
+                    r["last_name"],
+                    r["first_name"],
+                    ymd_to_us(r["point_date"]),
+                    f"{pts:.1f}",
+                    r["reason"] or "",
+                    r["note"] or "",
+                    r["flag_code"] or "",
+                    f"{float(r['current_total']):.1f}",
+                ])
+
+        if hasattr(self.app, "set_status"):
+            self.app.set_status(f"Current-total report exported - {os.path.basename(path)}", ok=True)
+        return path
+
+    def export_point_history_instance_total(self, include_current_total=True):
+        """
+        Exports history with an 'Instance Total' column: the running total for each
+        employee as of that specific entry (ordered by date, then entry id).
+        Optionally also includes the live 'Point Total (current)' for comparison.
+        """
+        # Refresh only affects current_total; instance_total is computed by SQL per-row
+        try:
+            if include_current_total and hasattr(self.app, "_refresh_all"):
+                self.app._refresh_all()
+        except Exception:
+            pass
+
+        rows = self.conn.execute(f"""
+            SELECT
+                p.id,
+                e.employee_id,
+                e.last_name,
+                e.first_name,
+                p.point_date,
+                COALESCE(p.points, 0.0) AS points,
+                p.reason,
+                p.note,
+                p.flag_code,
+                -- Running total up to and including this row for each employee
+                SUM(COALESCE(p.points, 0.0)) OVER (
+                    PARTITION BY p.employee_id
+                    ORDER BY p.point_date, p.id
+                    ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+                ) AS instance_total
+                {", COALESCE(e.point_total, 0.0) AS current_total" if include_current_total else ""}
+            FROM points_history p
+            JOIN employees e ON e.employee_id = p.employee_id
+            ORDER BY e.employee_id ASC, p.point_date ASC, p.id ASC;
+        """).fetchall()
+
+        path = self._default_save_path("point_history_instance_totals")
+        with open(path, "w", newline="", encoding="utf-8") as f:
+            w = csv.writer(f)
+            headers = [
+                "Entry ID","Employee ID","Last Name","First Name",
+                "Point Date","Point","Reason","Note","Flag Code","Instance Total"
+            ]
+            if include_current_total:
+                headers.append("Point Total (current)")
+            w.writerow(headers)
+
+            for r in rows:
+                pts = float(r["points"] or 0)
+                row = [
+                    r["id"],
+                    r["employee_id"],
+                    r["last_name"],
+                    r["first_name"],
+                    ymd_to_us(r["point_date"]),
+                    f"{pts:.1f}",
+                    r["reason"] or "",
+                    r["note"] or "",
+                    r["flag_code"] or "",
+                    f"{float(r['instance_total']):.1f}",
+                ]
+                if include_current_total:
+                    row.append(f"{float(r['current_total']):.1f}")
+                w.writerow(row)
+
+        if hasattr(self.app, "set_status"):
+            self.app.set_status(f"Instance-total report exported - {os.path.basename(path)}", ok=True)
+        return path
+
+    def export_both_point_history_reports(self):
+        """
+        Convenience wrapper: generates both CSVs in one go.
+        """
+        p1 = self.export_point_history_current_total()
+        p2 = self.export_point_history_instance_total(include_current_total=True)
+        if hasattr(self.app, "set_status"):
+            self.app.set_status(
+                f"Both reports exported:\n"
+                f"- {os.path.basename(p1)}\n"
+                f"- {os.path.basename(p2)}",
+                ok=True
+            )
+        return p1, p2
 
 # ----------------------------
 # Main Application
@@ -2010,7 +2198,7 @@ class App(tk.Tk):
             print(f"⚠ Could not load logo: {e}")
 
         # Subtitle beneath logo
-        ttk.Label(logo_box, text="Point System", style="Header.TLabel").pack(padx=12, pady=(0,10))
+        ttk.Label(logo_box, text="Points Tracker", style="Header.TLabel").pack(padx=12, pady=(0,10))
         # Right notebook
         right = ttk.Frame(root_frame, padding=6, style="TFrame")
         right.grid(row=0, column=1, sticky="nsew")
