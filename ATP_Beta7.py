@@ -49,7 +49,7 @@ STATUS_COLORS = {
     "Termination Risk": "#ffd6d6",
 }
 
-DB_PATH      = "attendance_MASTER.db"
+DB_PATH      = "employeeroster.db"
 MAX_UNDO_HISTORY = 20  # Keep last 20 undo steps
 
 # ----------------------------
@@ -143,6 +143,16 @@ def calc_rolloff_and_perfect(last_point: date):
     roll_mark = add_months(last_point, 2)
     perf_mark = add_months(last_point, 3)
     return first_of_next_month(roll_mark), first_of_next_month(perf_mark)
+
+def first_of_month(d: date) -> date:
+    return d.replace(day=1)
+
+def add_months(d: date, months: int) -> date:
+    # safe month math without external libs
+    y = d.year + (d.month - 1 + months) // 12
+    m = (d.month - 1 + months) % 12 + 1
+    return date(y, m, 1)
+
 
 # --- PATCH: reason choices helper -------------------------------------------
 def get_reason_options(conn):
@@ -1472,7 +1482,92 @@ class AddPointsFrame(ttk.Frame):
         win.bind("<Delete>", lambda e: delete_selected())
 
         load_history()
+# === YTD Roll-Off Engine (Beta7v1) ===========================================
+from datetime import date
 
+def _first_of_month(d: date) -> date:
+    return d.replace(day=1)
+
+def _add_months(d: date, months: int) -> date:
+    y = d.year + (d.month - 1 + months) // 12
+    m = (d.month - 1 + months) % 12 + 1
+    return date(y, m, 1)
+
+def _table_has_column(conn, table: str, column: str) -> bool:
+    cols = {r[1] for r in conn.execute(f"PRAGMA table_info({table})")}
+    return column in cols
+
+# === YTD Roll-Off Engine (module-level) ======================================
+from datetime import date
+
+def _first_of_month(d: date) -> date:
+    return d.replace(day=1)
+
+def _add_months(d: date, months: int) -> date:
+    y = d.year + (d.month - 1 + months) // 12
+    m = (d.month - 1 + months) % 12 + 1
+    return date(y, m, 1)
+
+def apply_ytd_rolloffs(conn, run_date: date | None = None, dry_run: bool = False):
+    """
+    On the first of each month, roll off the net points from the same month last year.
+    Example: 2026-10-01 rolls off 2025-10-01..2025-11-01.
+    Returns [(employee_id, rolloff_points)] for preview or applied rows.
+    """
+    run_date = run_date or date.today()
+    today_first = _first_of_month(run_date)
+
+    window_start = date(today_first.year - 1, today_first.month, 1)
+    window_end   = _add_months(window_start, 1)
+
+    # Net points for that prior month, per employee (positives + negatives)
+    rows = conn.execute("""
+        SELECT employee_id,
+               ROUND(COALESCE(SUM(points), 0.0), 3) AS net_points
+        FROM points_history
+        WHERE date(point_date) >= ? AND date(point_date) < ?
+        GROUP BY employee_id
+        HAVING net_points > 0.0
+    """, (window_start.isoformat(), window_end.isoformat())).fetchall()
+
+    results = []
+    for emp_id, net in rows:
+        # Skip if already applied today (by reason or note)
+        already = conn.execute("""
+            SELECT 1
+              FROM points_history
+             WHERE employee_id = ?
+               AND date(point_date) = date(?)
+               AND (reason = 'YTD Roll-Off'
+                    OR note LIKE ?)
+             LIMIT 1
+        """, (emp_id, today_first.isoformat(),
+              f"YTD roll-off for {window_start.strftime('%b %Y')}%")).fetchone()
+        if already:
+            continue
+
+        if dry_run:
+            results.append((int(emp_id), float(net)))
+            continue
+
+        conn.execute("""
+            INSERT INTO points_history (employee_id, point_date, points, reason, note, flag_code)
+            VALUES (?, ?, ?, ?, ?, ?)
+        """, (
+            int(emp_id),
+            today_first.isoformat(),
+            -float(net),
+            "YTD Roll-Off",
+            f"YTD roll-off for {window_start.strftime('%b %Y')}",
+            "AUTO"
+        ))
+        results.append((int(emp_id), float(net)))
+
+    if not dry_run and results:
+        conn.commit()
+    return results
+    
+# ============================================================================
 # ----------------------------
 # Reports Tab
 # ----------------------------
@@ -1509,6 +1604,7 @@ class ReportsFrame(ttk.Frame):
         outer = ttk.Frame(self, padding=(10, 10, 10, 10), style="Pane.TFrame")
         outer.grid(row=0, column=0, sticky="nsew")
         outer.columnconfigure(0, weight=1)
+        outer.rowconfigure(1, weight=1)  # let the button area expand
 
         # Top toolbar (right-aligned trio)
         toolbar = ttk.Frame(outer)
@@ -1516,19 +1612,28 @@ class ReportsFrame(ttk.Frame):
         for i in range(3):
             toolbar.columnconfigure(i, weight=0)
 
-        # Button grid below (two neat columns, left-aligned)
         gridbox = ttk.Frame(outer)
-        gridbox.grid(row=1, column=0, sticky="w")
-        gridbox.columnconfigure(0, weight=0)
-        gridbox.columnconfigure(1, weight=0)
+        gridbox.grid(row=1, column=0, sticky="nsew")
+        gridbox.columnconfigure(0, weight=1, uniform="cols")
+        gridbox.columnconfigure(1, weight=1, uniform="cols")
+
+        left_card  = ttk.LabelFrame(gridbox, text="Preview / Exports")
+        right_card = ttk.LabelFrame(gridbox, text="Actions")
+        left_card.grid(row=0, column=0, sticky="nsew", padx=(0,8))
+        right_card.grid(row=0, column=1, sticky="nsew", padx=(8,0))
+        left_card.columnconfigure(0, weight=1)
+        right_card.columnconfigure(0, weight=1)
+
+
+        # Make buttons fill width & left-align their labels a bit
+        s.configure(BTN_STYLE, padding=(12, 8), font=("Segoe UI", 10, "bold"), anchor="w")
 
         # Convenience creator
-        def BTN(parent, text, cmd, r=None, c=None):
+        def BTN(parent, text, cmd, r=None, c=None, span=1):
             b = ttk.Button(parent, text=text, style=BTN_STYLE, command=cmd, takefocus=True)
             if r is None:
-                # allow toolbar pack via grid(...) outside
                 return b
-            b.grid(row=r, column=c, padx=6, pady=4, sticky="w")
+            b.grid(row=r, column=c, columnspan=span, padx=6, pady=6, sticky="ew")
             return b
 
         # ----------------------------
@@ -1546,31 +1651,209 @@ class ReportsFrame(ttk.Frame):
             _safe_cmd("export_both_point_history_reports")
         ).grid(row=0, column=2, sticky="e")
 
-        # ----------------------------
-        # Main grid buttons (2 columns)
-        #   Left column = preview/exports (no DB changes)
-        #   Right column = actions that update DB
-       
-        # ----------------------------
-
-        # PREVIEW/EXPORTS (no DB changes)
-        BTN(gridbox, "Preview: Upcoming 2-Month Rolloffs",
+        # Left card — PREVIEW / EXPORTS
+        BTN(left_card, "Preview: Upcoming 2-Month Rolloffs",
             _safe_cmd("export_rolloffs"), r=0, c=0)
-
-        BTN(gridbox, "Preview: Upcoming Perfect Attendance",
+        BTN(left_card, "Preview: Upcoming Perfect Attendance",
             _safe_cmd("export_perfect"), r=1, c=0)
-
-        # ACTIONS (mutate DB)
-        BTN(gridbox, "Run: Apply 2-Month Rolloffs",
-            _safe_cmd("auto_expire_points"), r=0, c=1)
-
-        BTN(gridbox, "Run: Perfect Attendance (Advance Dates)",
-            lambda: _safe_cmd("perfect_attendance_report")(date.today(), False), r=1, c=1)
-
-        # Optional: a safe simulation button (no DB writes)
-        BTN(gridbox, "Simulate: Perfect Attendance (No Changes)",
+        BTN(left_card, "Simulate: Perfect Attendance (No Changes)",
             lambda: _safe_cmd("perfect_attendance_report")(date.today(), True), r=2, c=0)
+        BTN(left_card, "Preview: YTD Roll-Offs",
+            _safe_cmd("_preview_ytd_rolloffs"), r=3, c=0)
 
+        # Right card — ACTIONS
+        BTN(right_card, "Run: Apply 2-Month Rolloffs",
+            _safe_cmd("auto_expire_points"), r=0, c=0)
+        BTN(right_card, "Run: Perfect Attendance (Advance Dates)",
+            lambda: _safe_cmd("perfect_attendance_report")(date.today(), False), r=1, c=0)
+        BTN(right_card, "Run: YTD Roll-Offs",
+            _safe_cmd("_run_ytd_rolloffs"), r=2, c=0)
+        # 👇 Your new import button goes here
+        BTN(right_card, "Import: Point History (CSV)…",
+            _safe_cmd("_import_point_history_csv"), r=3, c=0)
+
+    def _import_point_history_csv(self):
+        """
+        Import historical point entries from a CSV.
+        Required columns (case/spacing flexible): Employee ID, Point Date, Point
+        Optional: Reason, Note, Flag Code
+        Accepts dates: YYYY-MM-DD, MM-DD-YYYY, MM/DD/YYYY, YYYY/MM/DD
+        """
+        import csv, re
+        from tkinter import filedialog, messagebox
+
+        # --- choose file
+        path = filedialog.askopenfilename(
+            title="Select point history CSV",
+            filetypes=[("CSV files", "*.csv"), ("All files", "*.*")]
+        )
+        if not path:
+            return
+
+        # --- helpers
+        def _parse_date_any(s: str):
+            from datetime import datetime
+            s = (s or "").strip()
+            for fmt in ("%Y-%m-%d", "%m-%d-%Y", "%m/%d/%Y", "%Y/%m/%d"):
+                try:
+                    return datetime.strptime(s, fmt).date().isoformat()
+                except Exception:
+                    pass
+            return None
+
+        inserted = skipped_dupes = skipped_bad = skipped_missing_emp = 0
+        touched_emp_ids = set()
+
+        try:
+            with open(path, "r", newline="", encoding="utf-8-sig") as f:
+                reader = csv.DictReader(f)
+                if not reader.fieldnames:
+                    messagebox.showerror("Import Failed", "CSV has no header row.")
+                    return
+
+                # ---------- tolerant header mapping (KEEP THIS INDENT) ----------
+                def _norm_key(k: str) -> str:
+                    # collapse everything except a-z/0-9
+                    return re.sub(r"[^a-z0-9]+", "", (k or "").lower())
+
+                synonyms = {
+                    "employee_id": {"employeeid","empid","id","employee","employee#","employeenumber","employeeno"},
+                    "point_date":  {"pointdate","date","occurredon","dateofpoint","eventdate","entrydate","occurred","occurrence","pointdt"},
+                    "points":      {"point","points","value","pts","pointvalue","pointamount","score","pointtotal"},
+                    "reason":      {"reason","type","category","event","eventtype"},
+                    "note":        {"note","notes","comment","comments","memo"},
+                    "flag_code":   {"flagcode","flag","code","flags","tag","label"},
+                }
+
+                header_map = {}
+                normed = {h: _norm_key(h) for h in reader.fieldnames}
+                for original, nk in normed.items():
+                    for canon, bag in synonyms.items():
+                        if canon not in header_map and nk in bag:
+                            header_map[canon] = original
+
+                missing_required = [k for k in ("employee_id","point_date","points") if k not in header_map]
+                if missing_required:
+                    seen = ", ".join(reader.fieldnames)
+                    messagebox.showerror(
+                        "Import Failed",
+                        "Missing required column(s): " + ", ".join(missing_required) +
+                        "\n\nHeaders I saw:\n" + seen +
+                        "\n\nTip: use headers like 'Employee ID', 'Point Date', 'Point'."
+                    )
+                    return
+                # ---------- end header mapping ----------------------------------
+
+                # cache employee existence
+                emp_exists = {}
+
+                # transaction
+                self.conn.execute("BEGIN")
+                for row in reader:
+                    # employee id
+                    try:
+                        emp_id = int((row[header_map["employee_id"]] or "").strip())
+                    except Exception:
+                        skipped_bad += 1
+                        continue
+
+                    if emp_id not in emp_exists:
+                        emp_exists[emp_id] = bool(self.conn.execute(
+                            "SELECT 1 FROM employees WHERE employee_id=? LIMIT 1", (emp_id,)
+                        ).fetchone())
+                    if not emp_exists[emp_id]:
+                        skipped_missing_emp += 1
+                        continue
+
+                    # date
+                    iso = _parse_date_any(row[header_map["point_date"]])
+                    if not iso:
+                        skipped_bad += 1
+                        continue
+
+                    # points
+                    try:
+                        pts = float((row[header_map["points"]] or "0").strip())
+                    except Exception:
+                        skipped_bad += 1
+                        continue
+
+                    reason = (row.get(header_map.get("reason",""), "") or "").strip()
+                    note   = (row.get(header_map.get("note",""), "") or "").strip()
+                    flag   = (row.get(header_map.get("flag_code",""), "") or "").strip()
+
+                    # de-dupe exact natural key
+                    dupe = self.conn.execute("""
+                        SELECT 1 FROM points_history
+                         WHERE employee_id=?
+                           AND date(point_date)=date(?)
+                           AND ABS(COALESCE(points,0.0) - ?) < 0.0001
+                           AND COALESCE(reason,'') = ?
+                           AND COALESCE(note,'') = ?
+                           AND COALESCE(flag_code,'') = ?
+                         LIMIT 1
+                    """, (emp_id, iso, pts, reason, note, flag)).fetchone()
+                    if dupe:
+                        skipped_dupes += 1
+                        continue
+
+                    # insert row
+                    self.conn.execute("""
+                        INSERT INTO points_history (employee_id, point_date, points, reason, note, flag_code)
+                        VALUES (?, ?, ?, ?, ?, ?)
+                    """, (emp_id, iso, pts, reason, note, flag))
+                    inserted += 1
+                    touched_emp_ids.add(emp_id)
+
+                self.conn.commit()
+
+        except Exception as e:
+            try:
+                self.conn.execute("ROLLBACK")
+            except Exception:
+                pass
+            messagebox.showerror("Import Failed", str(e))
+            return
+
+        # recompute totals & anchors for affected employees
+        self._recalc_employee_totals(touched_emp_ids)
+
+        try:
+            if hasattr(self.app, "_refresh_all"):
+                self.app._refresh_all()
+        except Exception:
+            pass
+
+        messagebox.showinfo(
+            "Import Complete",
+            f"Imported: {inserted}\n"
+            f"Skipped duplicates: {skipped_dupes}\n"
+            f"Skipped bad rows: {skipped_bad}\n"
+            f"Skipped unknown employees: {skipped_missing_emp}"
+        )
+
+    def _recalc_employee_totals(self, emp_ids):
+        """Recompute employees.point_total and last_point_date for the given employees."""
+        if not emp_ids:
+            return
+        for emp_id in emp_ids:
+            total = self.conn.execute(
+                "SELECT COALESCE(SUM(points),0.0) FROM points_history WHERE employee_id=?",
+                (emp_id,)
+            ).fetchone()[0] or 0.0
+
+            last_pos = self.conn.execute(
+                "SELECT MAX(point_date) FROM points_history WHERE employee_id=? AND points>0",
+                (emp_id,)
+            ).fetchone()[0]
+
+            self.conn.execute("""
+                UPDATE employees
+                   SET point_total = ?,
+                       last_point_date = COALESCE(?, last_point_date)
+                 WHERE employee_id = ?
+            """, (round(float(total), 2), last_pos, emp_id))
+        self.conn.commit()
 
     def _default_save_path(self, prefix: str) -> str:
         """Save to program directory."""
@@ -1715,6 +1998,220 @@ class ReportsFrame(ttk.Frame):
         # Refresh all tabs
         try:
             self.app._refresh_all()
+        except Exception:
+            pass
+        
+    def _import_point_history_csv(self):
+        """
+        Import point history from CSV into points_history.
+        Required columns (any case/spacing): Employee ID, Point Date, Point
+        Optional: Reason, Note, Flag Code
+        Accepts dates: YYYY-MM-DD, MM-DD-YYYY, MM/DD/YYYY, YYYY/MM/DD
+        """
+        import csv, re
+        from tkinter import filedialog, messagebox
+
+        # 1) choose file
+        path = filedialog.askopenfilename(
+            title="Select point history CSV",
+            filetypes=[("CSV files", "*.csv"), ("All files", "*.*")]
+        )
+        if not path:
+            return
+
+        # 2) helpers
+        def _parse_date_any(s: str):
+            from datetime import datetime
+            s = (s or "").strip()
+            for fmt in ("%Y-%m-%d", "%m-%d-%Y", "%m/%d/%Y", "%Y/%m/%d"):
+                try:
+                    return datetime.strptime(s, fmt).date().isoformat()
+                except Exception:
+                    pass
+            return None
+
+        def _norm_key(k: str) -> str:
+            # strip everything except a-z/0-9 to match headers robustly
+            return re.sub(r"[^a-z0-9]+", "", (k or "").lower())
+
+        inserted = skipped_dupes = skipped_bad = skipped_missing_emp = 0
+        touched_emp_ids = set()
+
+        # 3) read CSV (no outer try/except)
+        with open(path, "r", newline="", encoding="utf-8-sig") as f:
+            reader = csv.DictReader(f)
+            if not reader.fieldnames:
+                messagebox.showerror("Import Failed", "CSV has no header row.")
+                return
+
+            # tolerant header mapping
+            synonyms = {
+                "employee_id": {"employeeid","empid","id","employee","employee#","employeenumber","employeeno"},
+                "point_date":  {"pointdate","date","occurredon","dateofpoint","eventdate","entrydate","occurred","occurrence","pointdt"},
+                "points":      {"point","points","value","pts","pointvalue","pointamount","score","pointtotal"},
+                "reason":      {"reason","type","category","event","eventtype"},
+                "note":        {"note","notes","comment","comments","memo"},
+                "flag_code":   {"flagcode","flag","code","flags","tag","label"},
+            }
+            header_map = {}
+            normed = {h: _norm_key(h) for h in reader.fieldnames}
+            for original, nk in normed.items():
+                for canon, bag in synonyms.items():
+                    if canon not in header_map and nk in bag:
+                        header_map[canon] = original
+
+            missing_required = [k for k in ("employee_id","point_date","points") if k not in header_map]
+            if missing_required:
+                seen = ", ".join(reader.fieldnames)
+                messagebox.showerror(
+                    "Import Failed",
+                    "Missing required column(s): " + ", ".join(missing_required) +
+                    "\n\nHeaders I saw:\n" + seen +
+                    "\n\nTip: use headers like 'Employee ID', 'Point Date', 'Point'."
+                )
+                return
+
+            # cache employee existence
+            emp_exists = {}
+
+            # 4) transaction via context manager (auto-commit/rollback)
+            with self.conn:
+                for row in reader:
+                    # employee id
+                    try:
+                        emp_id = int((row[header_map["employee_id"]] or "").strip())
+                    except Exception:
+                        skipped_bad += 1
+                        continue
+
+                    if emp_id not in emp_exists:
+                        emp_exists[emp_id] = bool(self.conn.execute(
+                            "SELECT 1 FROM employees WHERE employee_id=? LIMIT 1", (emp_id,)
+                        ).fetchone())
+                    if not emp_exists[emp_id]:
+                        skipped_missing_emp += 1
+                        continue
+
+                    # date
+                    iso = _parse_date_any(row[header_map["point_date"]])
+                    if not iso:
+                        skipped_bad += 1
+                        continue
+
+                    # points
+                    try:
+                        pts = float((row[header_map["points"]] or "0").strip())
+                    except Exception:
+                        skipped_bad += 1
+                        continue
+
+                    reason = (row.get(header_map.get("reason",""), "") or "").strip()
+                    note   = (row.get(header_map.get("note",""), "") or "").strip()
+                    flag   = (row.get(header_map.get("flag_code",""), "") or "").strip()
+
+                    # de-dupe
+                    dupe = self.conn.execute("""
+                        SELECT 1 FROM points_history
+                         WHERE employee_id=?
+                           AND date(point_date)=date(?)
+                           AND ABS(COALESCE(points,0.0) - ?) < 0.0001
+                           AND COALESCE(reason,'') = ?
+                           AND COALESCE(note,'') = ?
+                           AND COALESCE(flag_code,'') = ?
+                         LIMIT 1
+                    """, (emp_id, iso, pts, reason, note, flag)).fetchone()
+                    if dupe:
+                        skipped_dupes += 1
+                        continue
+
+                    # insert
+                    self.conn.execute("""
+                        INSERT INTO points_history (employee_id, point_date, points, reason, note, flag_code)
+                        VALUES (?, ?, ?, ?, ?, ?)
+                    """, (emp_id, iso, pts, reason, note, flag))
+                    inserted += 1
+                    touched_emp_ids.add(emp_id)
+
+        # 5) recompute totals & anchors
+        self._recalc_employee_totals(touched_emp_ids)
+
+        # 6) refresh & summary
+        try:
+            if hasattr(self.app, "_refresh_all"):
+                self.app._refresh_all()
+        except Exception:
+            pass
+
+        messagebox.showinfo(
+            "Import Complete",
+            f"Imported: {inserted}\n"
+            f"Skipped duplicates: {skipped_dupes}\n"
+            f"Skipped bad rows: {skipped_bad}\n"
+            f"Skipped unknown employees: {skipped_missing_emp}"
+        )
+
+    def _recalc_employee_totals(self, emp_ids):
+        """Recompute employees.point_total and last_point_date for the given employees."""
+        if not emp_ids:
+            return
+        for emp_id in emp_ids:
+            total = self.conn.execute(
+                "SELECT COALESCE(SUM(points),0.0) FROM points_history WHERE employee_id=?",
+                (emp_id,)
+            ).fetchone()[0] or 0.0
+
+            last_pos = self.conn.execute(
+                "SELECT MAX(point_date) FROM points_history WHERE employee_id=? AND points>0",
+                (emp_id,)
+            ).fetchone()[0]
+
+            self.conn.execute("""
+                UPDATE employees
+                   SET point_total = ?,
+                       last_point_date = COALESCE(?, last_point_date)
+                 WHERE employee_id = ?
+            """, (round(float(total), 2), last_pos, emp_id))
+        self.conn.commit()
+
+    # -------------------------------------------------------------------
+    def _preview_ytd_rolloffs(self):
+        from tkinter import messagebox
+        try:
+            rows = apply_ytd_rolloffs(self.conn, dry_run=True)
+        except Exception as e:
+            messagebox.showerror("YTD Roll-Offs (Preview)", f"Error: {e}")
+            return
+
+        if not rows:
+            messagebox.showinfo("YTD Roll-Offs (Preview)", "Nothing eligible for this month.")
+            return
+
+        lines = [f"Emp {emp_id}: {pts:.2f} point(s)" for emp_id, pts in rows]
+        # show at most ~50 lines so the dialog stays readable
+        if len(lines) > 50:
+            lines = lines[:50] + [f"...and {len(rows)-50} more"]
+        messagebox.showinfo("YTD Roll-Offs (Preview)", "\n".join(lines))
+
+
+    def _run_ytd_rolloffs(self):
+        from tkinter import messagebox
+        try:
+            rows = apply_ytd_rolloffs(self.conn, dry_run=False)
+        except Exception as e:
+            messagebox.showerror("YTD Roll-Offs", f"Error: {e}")
+            return
+
+        if not rows:
+            messagebox.showinfo("YTD Roll-Offs", "No roll-offs applied (none eligible or already applied today).")
+            return
+
+        total_pts = sum(float(pts) for _, pts in rows)
+        messagebox.showinfo("YTD Roll-Offs", f"Applied to {len(rows)} employee(s), total {total_pts:.2f} point(s).")
+
+        # refresh UI if your app exposes it
+        try:
+            if hasattr(self.app, "_refresh_all"):
+                self.app._refresh_all()
         except Exception:
             pass
 
