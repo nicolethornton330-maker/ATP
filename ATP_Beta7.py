@@ -223,16 +223,20 @@ def safe_connect_db(path=DB_PATH):
     return conn
 
 def ensure_db_schema(conn):
-    """Ensure database schema is up to date, migrating if needed."""
+    # Allow dict-style row access everywhere
+    conn.row_factory = sqlite3.Row
+
     cursor = conn.cursor()
 
-    # Create employees table if it doesn't exist
+    # --- Tables (safe if they already exist) ---
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS employees (
             employee_id INTEGER PRIMARY KEY,
+            -- Keep Location out of the CREATE in case older DBs exist without it.
+            -- We'll add it via ALTER below to avoid mismatched schemas.
             last_name TEXT NOT NULL,
             first_name TEXT NOT NULL,
-            point_total REAL DEFAULT 0,
+            point_total REAL DEFAULT 0.0,
             last_point_date TEXT,
             rolloff_date TEXT,
             perfect_attendance TEXT,
@@ -241,7 +245,6 @@ def ensure_db_schema(conn):
         );
     """)
 
-    # Create points_history table if it doesn't exist
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS points_history (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -255,18 +258,20 @@ def ensure_db_schema(conn):
         );
     """)
 
-    # Create indices
+    # --- Indexes (idempotent) ---
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_emp_name ON employees(last_name, first_name);")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_points_emp ON points_history(employee_id);")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_points_date ON points_history(point_date);")
+    cursor.execute('CREATE INDEX IF NOT EXISTS idx_emp_loc_name ON employees("Location", last_name, first_name);')
 
-    # MIGRATION: Add is_active column if it doesn't exist
+    # --- Column migrations ---
     cursor.execute("PRAGMA table_info(employees)")
-    columns = [row[1] for row in cursor.fetchall()]
+    cols = [r[1] for r in cursor.fetchall()]
 
-    if "is_active" not in columns:
-        cursor.execute("ALTER TABLE employees ADD COLUMN is_active INTEGER DEFAULT 1;")
-        print("ℹ Migrated database: Added is_active column to employees.")
+    # Add Location if missing; respect your capital-L column name exactly.
+    if "Location" not in cols:
+        cursor.execute('ALTER TABLE employees ADD COLUMN "Location" TEXT;')
+        print('ℹ Migrated DB: added "Location" column to employees.')
 
     conn.commit()
 
@@ -335,9 +340,9 @@ class EmployeesFrame(ttk.Frame):
         self.search_entry.pack(side="left", padx=6)
         self.search_entry.bind("<KeyRelease>", lambda e: self.refresh())
 
-        cols = ("employee_id","last_name","first_name","total",
+        cols = ("employee_id","Location","last_name","first_name","total",
                 "last_point","rolloff_date","perfect_bonus","warning_date")
-        headers = ["ID","Last Name","First Name","Total Points",
+        headers = ["ID","Location","Last Name","First Name","Total Points",
                    "Last Point","2-Month Rolloff","Perfect Attendance","Warning Issued"]
 
         # Persist columns for later access
@@ -373,6 +378,7 @@ class EmployeesFrame(ttk.Frame):
         self.new_last = tk.StringVar()
         self.new_first = tk.StringVar()
         self.new_perfect = tk.StringVar()
+        self.new_location = tk.StringVar()   # >>> NEW: Location
 
         # ---- Add Employee form (row 3) ----
         form = ttk.Frame(self, padding=(6,8,6,6))
@@ -382,6 +388,14 @@ class EmployeesFrame(ttk.Frame):
 
         ttk.Label(form, text="Employee ID:").grid(row=1, column=0, sticky="e", padx=4)
         ttk.Entry(form, textvariable=self.new_id, width=12).grid(row=1, column=1, sticky="w", padx=4)
+        
+        ttk.Label(form, text="Location:").grid(row=1, column=6, sticky="e", padx=4)     # >>> NEW: Location
+        ttk.Entry(form, textvariable=self.new_location, width=18)\
+            .grid(row=1, column=7, sticky="w", padx=4)                                   # >>> NEW: Location
+
+        # Ensure the form can stretch this far:
+        form.columnconfigure(7, weight=1)
+
 
         ttk.Label(form, text="Last Name:").grid(row=1, column=2, sticky="e", padx=4)
         ttk.Entry(form, textvariable=self.new_last, width=20).grid(row=1, column=3, sticky="w", padx=4)
@@ -506,6 +520,7 @@ class EmployeesFrame(ttk.Frame):
     def _rows(self):
         cur = self.conn.execute("""
             SELECT e.employee_id,
+                   e."Location" AS Location,
                    e.last_name,
                    e.first_name,
                    e.point_total,
@@ -515,11 +530,16 @@ class EmployeesFrame(ttk.Frame):
                    e.point_warning_date,
                    e.is_active
               FROM employees e
-          ORDER BY e.last_name, e.first_name;
+          ORDER BY
+          CASE WHEN e."Location" IS NULL OR TRIM(e."Location") = '' THEN 1 ELSE 0 END, -- blanks last
+          LOWER(e."Location"),
+          LOWER(e.last_name),
+          LOWER(e.first_name);
         """)
         rows = []
         for rec in cur.fetchall():
             emp_id   = rec["employee_id"]
+            loc      = rec["Location"] or ""
             ln       = rec["last_name"] or ""
             fn       = rec["first_name"] or ""
             total    = rec["point_total"] or 0
@@ -527,7 +547,7 @@ class EmployeesFrame(ttk.Frame):
             rd       = ymd_to_us(rec["rolloff_date"]) if rec["rolloff_date"] else ""
             pb       = ymd_to_us(rec["perfect_attendance"]) if rec["perfect_attendance"] else ""
             pwd      = ymd_to_us(rec["point_warning_date"]) if rec["point_warning_date"] else ""
-            rows.append((emp_id, ln, fn, f"{float(total):.1f}", lpd, rd, pb, pwd))
+            rows.append((emp_id, loc, ln, fn, f"{float(total):.1f}", lpd, rd, pb, pwd))
         return rows
 
     def refresh(self):
@@ -541,18 +561,13 @@ class EmployeesFrame(ttk.Frame):
             tag = "even" if i % 2 == 0 else "odd"
             self.tree.insert("", "end", values=row, tags=(tag,))
         self.autosize_columns()
-    def _on_tree_double_click(self, event):
-        """Handle double-click on a row to open the inline edit dialog."""
-        item = self.tree.identify('item', event.x, event.y)
+    def _on_tree_double_click(self, event=None):
+        item = self.tree.identify_row(event.y)
         if not item:
             return
-
-        values = self.tree.item(item, "values")
-        if not values or len(values) == 0:
-            return
-
-        emp_id = int(values[0])
-        self._open_inline_edit(emp_id, item, None, None, None)
+        emp_id = int(self.tree.set(item, "employee_id"))
+        # old: self._open_inline_edit(emp_id, item, None, None, None)
+        self._open_inline_edit(emp_id)  # ✅ new
 
     def autosize_columns(self):
         """Resize each column to best fit its longest visible text or header."""
@@ -595,119 +610,130 @@ class EmployeesFrame(ttk.Frame):
                 share = (current / total_width) * extra
                 self.tree.column(col, width=int(current + share))
 
-    def _on_tree_double_click(self, event):
-        """Handle double-click for inline editing."""
-        item = self.tree.identify('item', event.x, event.y)
+    def _on_tree_double_click(self, event=None):
+        # Identify the row under the cursor
+        item = self.tree.identify_row(event.y) if event else (self.tree.selection()[0] if self.tree.selection() else "")
         if not item:
             return
+        # Read the employee_id from the row
+        emp_id_str = self.tree.set(item, "employee_id")
+        try:
+            emp_id = int(emp_id_str)
+        except Exception:
+            return  # silently ignore if something weird is selected
 
-        values = self.tree.item(item, "values")
-        if not values or len(values) == 0:
-            return
+        # NEW: call the updated editor signature
+        self._open_inline_edit(emp_id)
 
-        emp_id = int(values[0])
-        # Call the dedicated editor window
-        self._open_inline_edit(emp_id, item, None, None, None)
-
-    def _open_inline_edit(self, emp_id, *_):
-        """Open a dialog to edit all employee fields for the selected ID (except ID)."""
+    def _open_inline_edit(self, emp_id: int):
+        # Pull full record, quoting Location exactly as it exists in your DB
         rec = self.conn.execute("""
-            SELECT employee_id, last_name, first_name, point_total,
-                   last_point_date, rolloff_date, perfect_attendance,
+            SELECT employee_id,
+                   last_name,
+                   first_name,
+                   "Location" AS Location,
+                   point_total,
+                   last_point_date,
+                   rolloff_date,
+                   perfect_attendance,
                    point_warning_date
               FROM employees
              WHERE employee_id=?;
         """, (emp_id,)).fetchone()
 
         if not rec:
-            messagebox.showerror("Error", f"Employee ID {emp_id} not found.")
+            messagebox.showerror("Not found", f"Employee #{emp_id} not found.")
             return
 
-        # --- Window setup ---
+        # Window
         win = tk.Toplevel(self)
         win.title(f"Edit Employee #{emp_id}")
-        win.transient(self)
+        win.transient(self.winfo_toplevel())
         win.grab_set()
-        win.configure(bg="#f6f8fb")
-        win.geometry("420x600")
+        win.resizable(False, False)
+        frame = ttk.Frame(win, padding=16)
+        frame.grid(sticky="nsew")
 
-        container = ttk.Frame(win, padding=20)
-        container.pack(fill="both", expand=True)
+        # Helper: US<->ISO date adapters you already have in the file
+        def _us(ymd):  # ymd -> MM-DD-YYYY or ""
+            return ymd_to_us(ymd) if ymd else ""
+        def _iso(us):  # MM-DD-YYYY -> YYYY-MM-DD or None
+            return parse_us_to_iso(us) if us else None
 
-        ttk.Label(container, text=f"Editing Employee #{emp_id}",
-                  style="Header.TLabel").pack(anchor="w", pady=(0,10))
-
-        # --- Editable fields (excluding ID) ---
+        # Build fields (label, key, initial_value)
         fields = [
-            ("Last Name", "last_name"),
-            ("First Name", "first_name"),
-            ("Point Total", "point_total"),
-            ("Last Point Date (MM-DD-YYYY)", "last_point_date"),
-            ("2-Month Rolloff Date (MM-DD-YYYY)", "rolloff_date"),
-            ("Perfect Attendance (MM-DD-YYYY)", "perfect_attendance"),
-            ("Warning Issued (MM-DD-YYYY)", "point_warning_date"),
+            ("Last Name", "last_name", rec["last_name"] or ""),
+            ("First Name", "first_name", rec["first_name"] or ""),
+            ("Location", "Location", rec["Location"] or ""),  # <- mixed-case key
+            ("Point Total", "point_total", f'{float(rec["point_total"] or 0):.1f}'),
+            ("Last Point Date (MM-DD-YYYY)", "last_point_date", _us(rec["last_point_date"])),
+            ("2-Month Rolloff Date (MM-DD-YYYY)", "rolloff_date", _us(rec["rolloff_date"])),
+            ("Perfect Attendance (MM-DD-YYYY)", "perfect_attendance", _us(rec["perfect_attendance"])),
+            ("Warning Issued (MM-DD-YYYY)", "point_warning_date", _us(rec["point_warning_date"])),
         ]
-        vars = {}
 
-        for label, key in fields:
-            ttk.Label(container, text=label).pack(anchor="w", pady=(4,0))
-            if key.endswith("_date"):
-                val = ymd_to_us(rec[key]) if rec[key] else ""
-            elif key == "point_total":
-                val = f"{float(rec[key]):.1f}" if rec[key] is not None else "0.0"
-            else:
-                val = rec[key] or ""
-            vars[key] = tk.StringVar(value=val)
-            ttk.Entry(container, textvariable=vars[key], width=36).pack(anchor="w", pady=(0,6))
+        # Draw inputs
+        vars_by_key = {}
+        for r, (label, key, initial) in enumerate(fields, start=0):
+            ttk.Label(frame, text=label).grid(row=r, column=0, sticky="w", pady=(0,6))
+            v = tk.StringVar(value=initial)
+            ttk.Entry(frame, textvariable=v, width=32).grid(row=r, column=1, sticky="w", pady=(0,6))
+            vars_by_key[key] = v
 
-        # --- Save logic ---
-        def save_changes():
-            updates = {}
-            for key, var in vars.items():
-                val = var.get().strip()
-                if key == "point_total":
-                    try:
-                        updates[key] = float(val) if val else 0.0
-                    except ValueError:
-                        messagebox.showerror("Invalid Value", "Point Total must be a number.")
-                        return
-                elif key.endswith("_date") and val:
-                    iso = parse_us_to_iso(val)
-                    if not iso:
-                        messagebox.showerror(
-                            "Invalid Date",
-                            f"{key.replace('_', ' ').title()} must be MM-DD-YYYY or blank."
-                        )
-                        return
-                    updates[key] = iso
-                else:
-                    updates[key] = val or None
+        # Buttons
+        btns = ttk.Frame(frame)
+        btns.grid(row=len(fields), column=0, columnspan=2, pady=(8,0), sticky="e")
+        def on_cancel():
+            win.destroy()
+
+        def on_save():
+            # Gather updates
+            ln  = (vars_by_key["last_name"].get() or "").strip()
+            fn  = (vars_by_key["first_name"].get() or "").strip()
+            loc = (vars_by_key["Location"].get() or "").strip()
+
+            # point_total
+            try:
+                pt = float((vars_by_key["point_total"].get() or "0").strip())
+            except Exception:
+                messagebox.showerror("Invalid Value", "Point Total must be a number (e.g., 0, 1.0, 4.5).")
+                return
+
+            # Dates
+            try:
+                lpd = _iso((vars_by_key["last_point_date"].get() or "").strip())
+                rod = _iso((vars_by_key["rolloff_date"].get() or "").strip())
+                pad = _iso((vars_by_key["perfect_attendance"].get() or "").strip())
+                pwd = _iso((vars_by_key["point_warning_date"].get() or "").strip())
+            except Exception:
+                messagebox.showerror("Invalid Date", "Dates must be in MM-DD-YYYY format.")
+                return
 
             try:
+                # Update — quote Location exactly
                 self.conn.execute("""
                     UPDATE employees
                        SET last_name=?,
                            first_name=?,
+                           "Location"=?,
                            point_total=?,
                            last_point_date=?,
                            rolloff_date=?,
                            perfect_attendance=?,
                            point_warning_date=?
                      WHERE employee_id=?;
-                """, (updates["last_name"], updates["first_name"], updates["point_total"],
-                      updates["last_point_date"], updates["rolloff_date"],
-                      updates["perfect_attendance"], updates["point_warning_date"], emp_id))
+                """, (ln, fn, loc, pt, lpd, rod, pad, pwd, emp_id))
                 self.conn.commit()
-                self.app.set_status(f"Updated Employee #{emp_id}", ok=True)
-                self.refresh()
-                self.refresh_all_cb()
-                win.destroy()
             except Exception as e:
-                messagebox.showerror("Error", f"Could not update employee: {e}")
+                messagebox.showerror("DB Error", f"Could not save changes:\n{e}")
+                return
 
-        # --- Buttons and shortcuts (note indentation) ---
-        ttk.Button(container, text="💾 Save Changes", command=save_changes).pack(pady=(12,6))
-        ttk.Button(container, text="Cancel", command=win.destroy).pack(pady=(0,8))
+            win.destroy()
+            self.refresh()
+            self.app.toast(f"Employee #{emp_id} updated.")
+
+        ttk.Button(btns, text="Cancel", command=on_cancel).pack(side="right", padx=(0,6))
+        ttk.Button(btns, text="Save", command=on_save).pack(side="right")
 
         win.bind("<Return>", lambda e: save_changes())
         win.bind("<Escape>", lambda e: win.destroy())
@@ -756,7 +782,7 @@ class EmployeesFrame(ttk.Frame):
         last = (self.new_last.get() or "").strip()
         first = (self.new_first.get() or "").strip()
         perfect_date_input = (self.new_perfect.get() or "").strip()
-
+        loc = (self.new_location.get() or "").strip()
         if not emp_id_raw or not last or not first:
             messagebox.showerror("Missing Info", "Please enter Employee ID, Last Name, and First Name.")
             return
@@ -786,7 +812,7 @@ class EmployeesFrame(ttk.Frame):
 
         try:
             self.conn.execute("""
-                INSERT INTO employees (employee_id, last_name, first_name, point_total, last_point_date, rolloff_date, perfect_attendance, point_warning_date, is_active)
+                INSERT INTO employees (employee_id, Location, last_name, first_name, point_total, last_point_date, rolloff_date, perfect_attendance, point_warning_date, is_active)
                 VALUES (?, ?, ?, 0.0, NULL, NULL, ?, NULL, 1);
             """, (emp_id, last, first, perfect_iso))
             self.conn.commit()
@@ -799,7 +825,7 @@ class EmployeesFrame(ttk.Frame):
         self.new_last.set("")
         self.new_first.set("")
         self.new_perfect.set("")
-
+        self.new_perfect.set(""); self.new_location.set("")
         self.app.set_status("Saved - Employee added.", ok=True)
 
         # Friendly confirmation popup
