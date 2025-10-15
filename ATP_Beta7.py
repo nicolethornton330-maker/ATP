@@ -997,8 +997,8 @@ class DashboardFrame(ttk.Frame):
                 status = self._status_for_total(total_f)
             except AttributeError:
                 status = ("Termination Risk" if total_f >= 7.0 else
-                          "Critical"         if total_f >=  5.0 else
-                          "Warning"          if total_f >=  4.0 else
+                          "Critical"         if total_f >=  6.0 else
+                          "Warning"          if total_f >=  5.0 else
                           "Safe")
 
             warn_dt = _fmt_date(r["warn_col"])
@@ -1012,9 +1012,9 @@ class DashboardFrame(ttk.Frame):
         total = float(total or 0.0)
         if total >= 7.0:
             return "Termination Risk"
-        if total >= 5.0:
+        if total >= 6.0:
             return "Critical"
-        if total >= 4.0:
+        if total >= 5.0:
             return "Warning"
         return "Safe"
 
@@ -2800,9 +2800,9 @@ def main():
         conn.close()
 
     if fresh:
-        print("✓ New attendance_MASTER.db created (schema initialized).")
+        print("✓ New employeeroster.db created (schema initialized).")
     else:
-        print("ℹ Existing attendance_MASTER.db detected - schema ensured.")
+        print("ℹ Existing employeeroster.db detected - schema ensured.")
 
     app = App()
     app.mainloop()
