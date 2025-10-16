@@ -735,7 +735,7 @@ class EmployeesFrame(ttk.Frame):
         ttk.Button(btns, text="Cancel", command=on_cancel).pack(side="right", padx=(0,6))
         ttk.Button(btns, text="Save", command=on_save).pack(side="right")
 
-        win.bind("<Return>", lambda e: save_changes())
+        win.bind("<Return>", lambda e: on_save())
         win.bind("<Escape>", lambda e: win.destroy())
 
     def _delete_employee_prompt(self, emp_id, parent_win):
@@ -748,6 +748,7 @@ class EmployeesFrame(ttk.Frame):
             self.refresh()
             self.refresh_all_cb()
             parent_win.destroy()
+            
     def delete_selected_employees(self):
         """Delete one or more selected employees and their point history."""
         sel = self.tree.selection()
@@ -812,20 +813,33 @@ class EmployeesFrame(ttk.Frame):
 
         try:
             self.conn.execute("""
-                INSERT INTO employees (employee_id, Location, last_name, first_name, point_total, last_point_date, rolloff_date, perfect_attendance, point_warning_date, is_active)
-                VALUES (?, ?, ?, 0.0, NULL, NULL, ?, NULL, 1);
-            """, (emp_id, last, first, perfect_iso))
+                INSERT INTO employees (
+                    employee_id,
+                    "Location",
+                    last_name,
+                    first_name,
+                    point_total,
+                    last_point_date,
+                    rolloff_date,
+                    perfect_attendance,
+                    point_warning_date,
+                    is_active
+                )
+                VALUES (?, ?, ?, ?, 0.0, NULL, NULL, ?, NULL, 1);
+            """, (emp_id, (loc or None), last, first, perfect_iso))
             self.conn.commit()
-        except sqlite3.IntegrityError as e:
-            messagebox.showerror("Database Error", f"Could not add employee: {e}")
+        except Exception as e:
+            messagebox.showerror("Database Error", f"Could not add employee:\n{e}")
             return
 
         # Clear inputs and confirm visually
         self.new_id.set("")
         self.new_last.set("")
         self.new_first.set("")
+        self.new_location.set("")
         self.new_perfect.set("")
-        self.new_perfect.set(""); self.new_location.set("")
+        self.new_perfect.set("")
+        self.refresh()
         self.app.set_status("Saved - Employee added.", ok=True)
 
         # Friendly confirmation popup
@@ -836,40 +850,6 @@ class EmployeesFrame(ttk.Frame):
 
         self.refresh()
         self.refresh_all_cb()
-
-        def save_changes():
-            last = last_var.get().strip()
-            first = first_var.get().strip()
-            if not last or not first:
-                messagebox.showerror("Missing Info", "Last and first names are required.")
-                return
-
-            try:
-                self.conn.execute(
-                    "UPDATE employees SET last_name=?, first_name=? WHERE employee_id=?",
-                    (last, first, emp_id)
-                )
-                self.conn.commit()
-                self.app.set_status("Saved - Employee updated.", ok=True)
-                self.refresh()
-                self.refresh_all_cb()
-                win.destroy()
-            except Exception as e:
-                messagebox.showerror("Error", f"Could not update employee: {e}")
-
-        def delete_employee():
-            if messagebox.askyesno("Confirm Delete", "Delete this employee and ALL their point history? This cannot be undone."):
-                self.conn.execute("DELETE FROM points_history WHERE employee_id=?", (emp_id,))
-                self.conn.execute("DELETE FROM employees WHERE employee_id=?", (emp_id,))
-                self.conn.commit()
-                self.app.set_status("Deleted - Employee and history removed.", ok=True)
-                self.refresh()
-                self.refresh_all_cb()
-                win.destroy()
-
-        ttk.Button(btn_frame, text="Save", command=save_changes).pack(side="left", padx=4)
-        ttk.Button(btn_frame, text="Delete Employee", command=delete_employee).pack(side="left", padx=4)
-        ttk.Button(btn_frame, text="Cancel", command=win.destroy).pack(side="left", padx=4)
 
 
 # ----------------------------
@@ -1686,6 +1666,8 @@ class ReportsFrame(ttk.Frame):
             lambda: _safe_cmd("perfect_attendance_report")(date.today(), True), r=2, c=0)
         BTN(left_card, "Preview: YTD Roll-Offs",
             _safe_cmd("_preview_ytd_rolloffs"), r=3, c=0)
+        BTN(left_card, "Preview: Point History (CSV)…",
+            _safe_cmd("_preview_point_history_csv"), r=4, c=0)
 
         # Right card — ACTIONS
         BTN(right_card, "Run: Apply 2-Month Rolloffs",
@@ -1857,6 +1839,209 @@ class ReportsFrame(ttk.Frame):
             f"Skipped bad rows: {skipped_bad}\n"
             f"Skipped unknown employees: {skipped_missing_emp}"
         )
+    def _preview_point_history_csv(self):
+        """
+        Dry-run preview of 'Import: Point History (CSV)...'
+        - No DB writes.
+        - Summarizes: would-import, duplicates, bad rows, unknown employees.
+        - Offers to export skipped unknowns to a CSV for review.
+        """
+        import csv, re
+        from datetime import datetime
+        from tkinter import filedialog, messagebox
+
+        # ------------- helpers -------------
+        def norm(s: str) -> str:
+            return re.sub(r"[^a-z0-9]+", "", (s or "").lower())
+
+        # accepted header synonyms (normalized)
+        HDR = {
+            "employee_id": {"employeeid", "empid", "id", "employee", "employee#", "employee_id"},
+            "point_date": {"pointdate", "date", "eventdate", "entrydate", "point_date"},
+            "points":     {"points", "point", "value", "pts", "score"},
+            "reason":     {"reason", "code", "occurrence", "violation", "type"},
+            "note":       {"note", "notes", "comment", "comments", "details"},
+            "flag_code":  {"flag", "flagcode", "flag_code", "code2"},
+        }
+
+        def _parse_date_any(s: str):
+            s = (s or "").strip()
+            if not s:
+                return None
+            for fmt in ("%Y-%m-%d", "%m-%d-%Y", "%m/%d/%Y", "%Y/%m/%d"):
+                try:
+                    return datetime.strptime(s, fmt).strftime("%Y-%m-%d")
+                except Exception:
+                    pass
+            return None  # unparseable
+
+        # ------------- choose file -------------
+        path = filedialog.askopenfilename(
+            title="Preview Point History CSV (no changes will be made)",
+            filetypes=[("CSV Files", "*.csv"), ("All Files", "*.*")]
+        )
+        if not path:
+            return
+
+        # ------------- snapshot DB state -------------
+        # existing employees
+        emp_ids = {row[0] for row in self.conn.execute("SELECT employee_id FROM employees").fetchall()}
+
+        # existing points_history (for duplicate detection)
+        existing = set()
+        cur = self.conn.execute("""
+            SELECT employee_id,
+                   point_date,
+                   points,
+                   COALESCE(reason, ''),
+                   COALESCE(note, ''),
+                   COALESCE(flag_code, '')
+              FROM points_history
+        """)
+        for (eid, d, pts, rsn, nt, flag) in cur.fetchall():
+            # normalize to tuple with simple canonicalization
+            existing.add((
+                int(eid),
+                (d or ""),
+                float(pts or 0),
+                (rsn or "").strip(),
+                (nt or "").strip(),
+                (flag or "").strip(),
+            ))
+
+        # ------------- iterate CSV -------------
+        would_import = 0
+        dup_rows = 0
+        bad_rows = 0
+        unknown_emp = 0
+
+        sample_unknown_ids = set()
+        first_bad_examples = []
+        first_dup_examples = []
+
+        unknown_rows_to_export = []  # for optional CSV export
+
+        try:
+            with open(path, newline="", encoding="utf-8-sig") as f:
+                reader = csv.DictReader(f)
+                if not reader.fieldnames:
+                    messagebox.showerror("Preview Failed", "CSV has no header row.")
+                    return
+
+                # build a fast header index (normalized)
+                header_norm_to_real = {norm(h): h for h in reader.fieldnames}
+
+                def get_val(row, field_key):
+                    # find the first header that maps to this logical field
+                    for cand in HDR[field_key]:
+                        if cand in header_norm_to_real:
+                            return (row.get(header_norm_to_real[cand]) or "").strip()
+                    return ""
+
+                for row in reader:
+                    emp_raw = get_val(row, "employee_id")
+                    date_raw = get_val(row, "point_date")
+                    pts_raw  = get_val(row, "points")
+                    reason   = get_val(row, "reason")
+                    note     = get_val(row, "note")
+                    flag     = get_val(row, "flag_code")
+
+                    # employee id
+                    try:
+                        emp_id = int(emp_raw)
+                    except Exception:
+                        bad_rows += 1
+                        if len(first_bad_examples) < 5:
+                            first_bad_examples.append(f"Bad employee_id: {emp_raw!r}")
+                        continue
+
+                    if emp_id not in emp_ids:
+                        unknown_emp += 1
+                        sample_unknown_ids.add(emp_id)
+                        # keep full row for optional export
+                        unknown_rows_to_export.append({
+                            "employee_id": emp_raw,
+                            "point_date": date_raw,
+                            "points": pts_raw,
+                            "reason": reason,
+                            "note": note,
+                            "flag_code": flag,
+                        })
+                        continue  # skip unknowns
+
+                    # date
+                    iso = _parse_date_any(date_raw)
+                    if not iso:
+                        bad_rows += 1
+                        if len(first_bad_examples) < 5:
+                            first_bad_examples.append(f"Bad date for {emp_id}: {date_raw!r}")
+                        continue
+
+                    # points
+                    try:
+                        pts = float(pts_raw)
+                    except Exception:
+                        bad_rows += 1
+                        if len(first_bad_examples) < 5:
+                            first_bad_examples.append(f"Bad points for {emp_id} on {iso}: {pts_raw!r}")
+                        continue
+
+                    tup = (emp_id, iso, pts, reason, note, flag)
+                    if tup in existing:
+                        dup_rows += 1
+                        if len(first_dup_examples) < 5:
+                            first_dup_examples.append(f"Duplicate: {emp_id} {iso} {pts} {reason!r} {flag!r}")
+                        continue
+
+                    would_import += 1
+
+        except Exception as e:
+            messagebox.showerror("Preview Failed", str(e))
+            return
+
+        # ------------- summary -------------
+        msg = [
+            "Point History CSV — Preview (no DB changes):",
+            "",
+            f"Would import: {would_import}",
+            f"Duplicates:   {dup_rows}",
+            f"Bad rows:     {bad_rows}",
+            f"Unknown emp:  {unknown_emp}",
+        ]
+
+        if first_bad_examples:
+            msg += ["", "Examples of bad rows:"] + [f"• {x}" for x in first_bad_examples]
+        if first_dup_examples:
+            msg += ["", "Examples of duplicates:"] + [f"• {x}" for x in first_dup_examples]
+        if sample_unknown_ids:
+            # show up to 10 sample IDs
+            ids_preview = ", ".join(str(x) for x in sorted(sample_unknown_ids)[:10])
+            more = "" if len(sample_unknown_ids) <= 10 else " …"
+            msg += ["", f"Unknown employee_id examples: {ids_preview}{more}"]
+
+        messagebox.showinfo("Preview Complete", "\n".join(msg))
+
+        # ------------- optional export of unknowns -------------
+        if unknown_rows_to_export and messagebox.askyesno(
+            "Export Unknown Employees?",
+            "Do you want to export the rows with unknown employee IDs to a CSV for review?"
+        ):
+            save_path = filedialog.asksaveasfilename(
+                title="Save Unknown-Employee Rows As…",
+                defaultextension=".csv",
+                filetypes=[("CSV Files", "*.csv"), ("All Files", "*.*")]
+            )
+            if save_path:
+                try:
+                    field_order = ["employee_id", "point_date", "points", "reason", "note", "flag_code"]
+                    with open(save_path, "w", newline="", encoding="utf-8") as out:
+                        w = csv.DictWriter(out, fieldnames=field_order)
+                        w.writeheader()
+                        for r in unknown_rows_to_export:
+                            w.writerow(r)
+                    messagebox.showinfo("Saved", f"Unknown-employee rows exported to:\n{save_path}")
+                except Exception as e:
+                    messagebox.showerror("Save Failed", str(e))
 
     def _recalc_employee_totals(self, emp_ids):
         """Recompute employees.point_total and last_point_date for the given employees."""
@@ -2755,7 +2940,14 @@ class App(tk.Tk):
         self.status_label.pack(side="left")
 
         self.protocol("WM_DELETE_WINDOW", self._on_close)
-
+        
+    def toast(self, msg: str, ms: int = 0):
+        # simple, blocking info box as a safe fallback
+        try:
+            messagebox.showinfo("Info", msg)
+        except Exception:
+            pass
+            
     def set_status(self, message: str, ok: bool=False):
         """Set status with auto-fade."""
         if self._status_timer:
