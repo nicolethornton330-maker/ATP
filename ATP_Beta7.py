@@ -2145,8 +2145,8 @@ class ReportsFrame(ttk.Frame):
                     emp_id,
                     today_iso,
                     -1.0 * removed,
-                    "Auto Rolloff Adjustment",
-                    "Automatic 2-Month Point Expiration (perfect-month skip)",
+                    "2 Month Roll Off",
+                    "",
                     "AUTO"
                 ))
 
