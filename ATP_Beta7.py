@@ -2147,7 +2147,7 @@ class ReportsFrame(ttk.Frame):
                     -1.0 * removed,
                     "2 Month Roll Off",
                     "",
-                    "AUTO"
+                    ""
                 ))
 
                 # CSV log row (aggregate)
