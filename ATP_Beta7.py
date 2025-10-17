@@ -2806,8 +2806,7 @@ class App(tk.Tk):
         style = ttk.Style(self)
         try:
             style.theme_use("clam")
-            print("Active ttk theme:", style.theme_use())
-            print("Available themes:", style.theme_names())
+            print("Running NTHORNTON POINTS TRACKING PROGRAM",)
 
         except Exception:
             pass
