@@ -21,7 +21,7 @@ import os
 import csv
 import sqlite3
 import calendar
-from datetime import datetime, date
+from datetime import datetime, date, timedelta
 from collections import deque
 import tkinter as tk
 import tkinter.font as tkfont
@@ -1610,75 +1610,499 @@ class ReportsFrame(ttk.Frame):
         outer = ttk.Frame(self, padding=(10, 10, 10, 10), style="Pane.TFrame")
         outer.grid(row=0, column=0, sticky="nsew")
         outer.columnconfigure(0, weight=1)
-        outer.rowconfigure(1, weight=1)  # let the button area expand
-
-        # Top toolbar (right-aligned trio)
-        toolbar = ttk.Frame(outer)
-        toolbar.grid(row=0, column=0, sticky="e", pady=(0, 8))
-        for i in range(3):
-            toolbar.columnconfigure(i, weight=0)
+        outer.rowconfigure(1, weight=1)
 
         gridbox = ttk.Frame(outer)
         gridbox.grid(row=1, column=0, sticky="nsew")
         gridbox.columnconfigure(0, weight=1, uniform="cols")
         gridbox.columnconfigure(1, weight=1, uniform="cols")
 
-        left_card  = ttk.LabelFrame(gridbox, text="Preview / Exports")
-        right_card = ttk.LabelFrame(gridbox, text="Actions")
+        left_card  = ttk.LabelFrame(gridbox, text="Reports (Preview / Export)")
+        right_card = ttk.LabelFrame(gridbox, text="Actions (Apply Changes)")
         left_card.grid(row=0, column=0, sticky="nsew", padx=(0,8))
         right_card.grid(row=0, column=1, sticky="nsew", padx=(8,0))
         left_card.columnconfigure(0, weight=1)
         right_card.columnconfigure(0, weight=1)
 
-
-        # Make buttons fill width & left-align their labels a bit
+        # Make buttons fill width & left-align labels
         s.configure(BTN_STYLE, padding=(12, 8), font=("Segoe UI", 10, "bold"), anchor="w")
 
-        # Convenience creator
-        def BTN(parent, text, cmd, r=None, c=None, span=1):
-            b = ttk.Button(parent, text=text, style=BTN_STYLE, command=cmd, takefocus=True)
-            if r is None:
-                return b
-            b.grid(row=r, column=c, columnspan=span, padx=6, pady=6, sticky="ew")
-            return b
+        def BTN(parent, text, cmd, r, c):
+            ttk.Button(parent, text=text, style=BTN_STYLE, command=cmd, takefocus=True)\
+               .grid(row=r, column=c, padx=6, pady=6, sticky="ew")
 
-        # ----------------------------
-        # Toolbar buttons (new trio)
-        # ----------------------------
-        BTN(toolbar, "Export: Current Totals",
-            _safe_cmd("export_point_history_current_total")
-        ).grid(row=0, column=0, padx=(0, 6), sticky="e")
+        # --- Left: PREVIEW / EXPORTS (no DB changes) ---
+        BTN(left_card,  "Export Point History (Last 30 Days)", self.cmd_export_point_history_last_30, r=0, c=0)
+        BTN(left_card,  "Preview: Upcoming Rolloffs (CSV)",    self.cmd_preview_upcoming_rolloffs,   r=1, c=0)
+        BTN(left_card,  "Preview: Upcoming Perfect Attendance (CSV)", self.cmd_preview_upcoming_perfect, r=2, c=0)
+        BTN(left_card,  "Preview: YTD Rolloffs (CSV)",         self.cmd_preview_ytd_rolloffs,        r=3, c=0)
 
-        BTN(toolbar, "Export: Instance Totals",
-            lambda: _safe_cmd("export_point_history_instance_total")(True)
-        ).grid(row=0, column=1, padx=(0, 6), sticky="e")
+        # --- Right: ACTIONS (writes DB), all with confirmations ---
+        BTN(right_card, "Apply 2-Month Rolloffs",              self.cmd_apply_2mo_rolloffs,          r=0, c=0)
+        BTN(right_card, "Apply Perfect Attendance",            self.cmd_apply_perfect_attendance,     r=1, c=0)
+        BTN(right_card, "Remove YTD Points",                   self.cmd_remove_ytd_points,            r=2, c=0)
+        BTN(right_card, "Repair: Sync Totals to History", self.cmd_repair_sync_history_to_totals, r=3, c=0)
 
-        BTN(toolbar, "Export: Both",
-            _safe_cmd("export_both_point_history_reports")
-        ).grid(row=0, column=2, sticky="e")
+    def cmd_repair_sync_history_to_totals(self, window_days: int = 30):
+        """
+        One-time repair after bulk import + manual GUI edits:
+        - Inserts a 'Balance Adjustment' row in points_history for each employee whose
+          summed history != employees.point_total.
+        - Dates the adjustment as (cutoff - 1 day) so it doesn't appear in the last-30-day export,
+          but the baseline is correct.
+        - Writes an audit CSV using the unified header.
+        """
+        from datetime import date, timedelta
+        from tkinter import messagebox
+        import csv, os
 
-        # Left card — PREVIEW / EXPORTS
-        BTN(left_card, "Preview: Upcoming 2-Month Rolloffs",
-            _safe_cmd("export_rolloffs"), r=0, c=0)
-        BTN(left_card, "Preview: Upcoming Perfect Attendance",
-            _safe_cmd("export_perfect"), r=1, c=0)
-        BTN(left_card, "Simulate: Perfect Attendance (No Changes)",
-            lambda: _safe_cmd("perfect_attendance_report")(date.today(), True), r=2, c=0)
-        BTN(left_card, "Preview: YTD Roll-Offs",
-            _safe_cmd("_preview_ytd_rolloffs"), r=3, c=0)
-        BTN(left_card, "Preview: Point History (CSV)…",
-            _safe_cmd("_preview_point_history_csv"), r=4, c=0)
+        if not messagebox.askyesno(
+            "Repair Totals vs History",
+            "Create balance-adjustment entries so point history sums match the GUI totals?\n"
+            "Adjustments will be dated before the last-30-day window."
+        ):
+            return
 
-        # Right card — ACTIONS
-        BTN(right_card, "Run: Apply 2-Month Rolloffs",
-            _safe_cmd("auto_expire_points"), r=0, c=0)
-        BTN(right_card, "Run: Perfect Attendance (Advance Dates)",
-            lambda: _safe_cmd("perfect_attendance_report")(date.today(), False), r=1, c=0)
-        BTN(right_card, "Run: YTD Roll-Offs",
-            _safe_cmd("_run_ytd_rolloffs"), r=2, c=0)
-        # 👇 Your new import button goes here
-        BTN(right_card, "Import: Point History (CSV)…",
-            _safe_cmd("_import_point_history_csv"), r=3, c=0)
+        cutoff_iso = (date.today() - timedelta(days=window_days)).isoformat()
+        adj_iso    = (date.today() - timedelta(days=window_days + 1)).isoformat()  # one day before window
+
+        # Pull all employees
+        emps = self.conn.execute("""
+            SELECT employee_id, last_name, first_name, COALESCE(point_total,0.0) AS gui_total
+            FROM employees
+            ORDER BY employee_id
+        """).fetchall()
+
+        log = []
+        touched = set()
+
+        for e in emps:
+            emp_id = e["employee_id"]
+            gui_total = float(e["gui_total"] or 0.0)
+            hist_total = float(self.conn.execute(
+                "SELECT COALESCE(SUM(points),0.0) FROM points_history WHERE employee_id=?",
+                (emp_id,)
+            ).fetchone()[0] or 0.0)
+
+            delta = round(gui_total - hist_total, 2)  # what we must add to history to match GUI
+            if abs(delta) < 0.001:
+                continue  # already in sync
+
+            # Insert balancing row BEFORE the 30-day window so it won't show in the export
+            self.conn.execute("""
+                INSERT INTO points_history (employee_id, point_date, points, reason, note, flag_code)
+                VALUES (?, ?, ?, ?, ?, ?)
+            """, (emp_id, adj_iso, delta, "Balance Adjustment", "Sync to GUI total after import", "ADJ"))
+            touched.add(emp_id)
+
+            # For the audit CSV (unified schema)
+            log.append([
+                emp_id, e["last_name"], e["first_name"],
+                self._us(adj_iso),
+                f"{delta:.1f}",
+                "Balance Adjustment",
+                "Sync to GUI total after import",
+                f"{gui_total:.1f}",    # Point Total column = target GUI total after this adjustment
+                "ADJ"
+            ])
+
+        if not log:
+            messagebox.showinfo("Repair Totals vs History", "No adjustments needed. Everything is already in sync.")
+            return
+
+        # Recompute employees.point_total from history so DB reflects the new truth
+        try:
+            self._recalc_employee_totals(touched)
+        except Exception:
+            pass
+
+        self.conn.commit()
+
+        # Audit CSV
+        path = self._default_save_path("balance_adjustments")
+        with open(path, "w", newline="", encoding="utf-8") as f:
+            w = csv.writer(f)
+            w.writerow(self._csv_header())
+            w.writerows(log)
+
+        messagebox.showinfo("Repair Complete",
+                            f"Inserted {len(log)} balance adjustment(s).\nSaved audit: {os.path.basename(path)}")
+
+        try: self.app._refresh_all()
+        except Exception: pass
+
+            # =========================
+            # Helpers (add these methods to ReportsFrame)
+            # =========================
+    def _csv_header(self):
+        return ["Employee ID","Last Name","First Name",
+                "Point Date","Point","Reason","Note","Point Total","Flag Code"]
+
+    def _confirm(self, title, message):
+        from tkinter import messagebox
+        return messagebox.askyesno(title, message)
+
+    def _us(self, ymd):
+        # Use your existing ymd_to_us() if present
+        try:
+            return ymd_to_us(ymd)
+        except Exception:
+            return ymd or ""
+
+    def _save_csv(self, prefix: str) -> str:
+        return self._default_save_path(prefix)
+        # =========================
+        # 1) Export Point History (Last 30 Days) with rolling total per entry
+        # =========================
+    def cmd_export_point_history_last_30(self):
+        if not self._confirm("Export Point History",
+                             "Export last 30 days of point history with a true running total?"):
+            return
+
+        from datetime import date, timedelta
+        import csv, os
+
+        cutoff = (date.today() - timedelta(days=30)).isoformat()
+
+        # Compute running totals over ALL history per employee,
+        # then filter to the last 30 days in the outer SELECT.
+        rows = self.conn.execute("""
+            WITH recent_emp AS (
+                SELECT DISTINCT employee_id
+                  FROM points_history
+                 WHERE date(point_date) >= date(?)
+            ),
+            ordered AS (
+                SELECT
+                    p.id,
+                    p.employee_id,
+                    e.last_name,
+                    e.first_name,
+                    p.point_date,
+                    COALESCE(p.points, 0.0)      AS points,
+                    COALESCE(p.reason, '')       AS reason,
+                    COALESCE(p.note, '')         AS note,
+                    COALESCE(p.flag_code, '')    AS flag_code,
+                    SUM(COALESCE(p.points, 0.0)) OVER (
+                        PARTITION BY p.employee_id
+                        ORDER BY date(p.point_date), p.id
+                        ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+                    ) AS instance_total
+                FROM points_history p
+                JOIN employees e ON e.employee_id = p.employee_id
+                WHERE p.employee_id IN (SELECT employee_id FROM recent_emp)
+            )
+            SELECT
+                employee_id, last_name, first_name,
+                point_date, points, reason, note,
+                instance_total AS point_total,  -- running total as of this entry
+                flag_code
+            FROM ordered
+            WHERE date(point_date) >= date(?)
+            ORDER BY employee_id, date(point_date), id;
+        """, (cutoff, cutoff)).fetchall()
+
+        path = self._default_save_path("point_history_last30")
+        with open(path, "w", newline="", encoding="utf-8") as f:
+            w = csv.writer(f)
+            w.writerow(self._csv_header())
+            for r in rows:
+                w.writerow([
+                    r["employee_id"],
+                    r["last_name"],
+                    r["first_name"],
+                    self._us(r["point_date"]),
+                    f"{float(r['points']):.1f}",
+                    r["reason"] or "",
+                    r["note"] or "",
+                    f"{float(r['point_total']):.1f}",  # true as-of total
+                    r["flag_code"] or "",
+                ])
+
+        try:
+            self.app.set_status(f"Exported: {os.path.basename(path)}", ok=True)
+        except Exception:
+            pass
+
+
+
+    # =========================
+    # 2) Preview: Upcoming 2-Month Rolloffs (CSV) — no DB changes
+    # =========================
+    def cmd_preview_upcoming_rolloffs(self):
+        if not self._confirm("Preview Upcoming Rolloffs",
+                             "Export a CSV of employees with a future 2-month rolloff date (no changes)?"):
+            return
+        rows = self.conn.execute("""
+            SELECT employee_id,last_name,first_name,rolloff_date,COALESCE(point_total,0.0) AS pt
+            FROM employees
+            WHERE rolloff_date IS NOT NULL AND date(rolloff_date) >= date('now')
+            ORDER BY rolloff_date, last_name, first_name;
+        """).fetchall()
+
+        path = self._save_csv("preview_upcoming_rolloffs")
+        import csv
+        with open(path, "w", newline="", encoding="utf-8") as f:
+            w = csv.writer(f); w.writerow(self._csv_header())
+            for r in rows:
+                w.writerow([
+                    r["employee_id"], r["last_name"], r["first_name"],
+                    self._us(r["rolloff_date"]),
+                    "0.0",
+                    "Upcoming 2-Month Rolloff",
+                    "",
+                    f"{float(r['pt']):.1f}",
+                    ""
+                ])
+        try: self.app.set_status(f"Exported: {os.path.basename(path)}", ok=True)
+        except Exception: pass
+
+    # =========================
+    # 3) Preview: Upcoming Perfect Attendance (CSV) — no DB changes
+    # =========================
+    def cmd_preview_upcoming_perfect(self):
+        if not self._confirm("Preview Upcoming Perfect Attendance",
+                             "Export a CSV of employees with a future perfect-attendance date (no changes)?"):
+            return
+        rows = self.conn.execute("""
+            SELECT employee_id,last_name,first_name,perfect_attendance AS d,
+                   COALESCE(point_total,0.0) AS pt
+            FROM employees
+            WHERE perfect_attendance IS NOT NULL AND date(perfect_attendance) >= date('now')
+            ORDER BY d, last_name, first_name;
+        """).fetchall()
+
+        path = self._save_csv("preview_upcoming_perfect_attendance")
+        import csv
+        with open(path, "w", newline="", encoding="utf-8") as f:
+            w = csv.writer(f); w.writerow(self._csv_header())
+            for r in rows:
+                w.writerow([
+                    r["employee_id"], r["last_name"], r["first_name"],
+                    self._us(r["d"]),
+                    "0.0",
+                    "Upcoming Perfect Attendance",
+                    "",
+                    f"{float(r['pt']):.1f}",
+                    ""
+                ])
+        try: self.app.set_status(f"Exported: {os.path.basename(path)}", ok=True)
+        except Exception: pass
+
+    # =========================
+    # 4) Apply 2-Month Rolloffs — writes DB, exports audit CSV
+    # (uses your existing cadence logic; may apply multiple 1.0 removals if overdue)
+    # =========================
+    def cmd_apply_2mo_rolloffs(self):
+        if not self._confirm("Apply 2-Month Rolloffs",
+                             "Proceed to apply 2-month rolloffs and export an audit CSV? This will modify employee totals."):
+            return
+
+        from datetime import datetime
+        today_iso = date.today().isoformat()
+        expired_recs = self.conn.execute("""
+            SELECT employee_id,last_name,first_name,rolloff_date,
+                   COALESCE(point_total,0.0) AS pt,
+                   NULLIF(last_point_date,'') AS last_point_iso
+            FROM employees
+            WHERE rolloff_date IS NOT NULL AND date(rolloff_date) <= date('now');
+        """).fetchall()
+
+        affected = 0
+        log_rows = []
+
+        for rec in expired_recs:
+            emp_id, ln, fn = rec["employee_id"], rec["last_name"], rec["first_name"]
+            current_total   = float(rec["pt"] or 0.0)
+            next_roll_iso   = rec["rolloff_date"]
+            last_point_iso  = rec["last_point_iso"]
+
+            next_roll = datetime.strptime(next_roll_iso, "%Y-%m-%d").date()
+            if last_point_iso:
+                anchor = datetime.strptime(last_point_iso, "%Y-%m-%d").date()
+                perfect_date = three_months_then_first(anchor)
+            else:
+                perfect_date = date.min
+
+            removed = 0
+            # apply all due rolloffs while there are points to remove
+            while next_roll <= date.today() and current_total > 0:
+                current_total = max(0.0, round(current_total - 1.0, 2))
+                removed += 1
+                next_roll = step_next_due(next_roll, perfect_date)
+
+            # even if no points removed, advance any overdue due-date
+            if next_roll_iso != next_roll.isoformat():
+                self.conn.execute("UPDATE employees SET rolloff_date=? WHERE employee_id=?",
+                                  (next_roll.isoformat(), emp_id))
+
+            if removed > 0:
+                affected += 1
+                # write a single aggregated negative entry for audit/history
+                self.conn.execute("""
+                    INSERT INTO points_history (employee_id, point_date, points, reason, note, flag_code)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                """, (emp_id, today_iso, -1.0*removed, "2 Month Rolloff", "", ""))
+                self.conn.execute("UPDATE employees SET point_total=? WHERE employee_id=?",
+                                  (current_total, emp_id))
+
+                log_rows.append([emp_id, ln, fn, today_iso, f"-{removed:.1f}",
+                                 "2 Month Rolloff", "", f"{current_total:.1f}", ""])
+
+        self.conn.commit()
+
+        import csv
+        path = self._save_csv("apply_2mo_rolloffs")
+        with open(path, "w", newline="", encoding="utf-8") as f:
+            w = csv.writer(f); w.writerow(self._csv_header())
+            for row in log_rows:
+                # row[3] is ISO; display as US for consistency
+                row[3] = self._us(row[3])
+                w.writerow(row)
+
+        from tkinter import messagebox
+        messagebox.showinfo("2-Month Rolloffs",
+                            f"Applied to {affected} employee(s).\nSaved: {os.path.basename(path)}")
+        try: self.app._refresh_all()
+        except Exception: pass
+
+    # =========================
+    # 5) Apply Perfect Attendance — advances dates, exports CSV
+    # =========================
+    def cmd_apply_perfect_attendance(self):
+        if not self._confirm("Apply Perfect Attendance",
+                             "Export current perfect-attendance dates and advance them? This updates employee records."):
+            return
+
+        from datetime import datetime
+        as_of_iso = date.today().isoformat()
+        rows = self.conn.execute("""
+            SELECT employee_id,last_name,first_name,
+                   COALESCE(point_total,0.0) AS pt,
+                   NULLIF(perfect_attendance,'') AS d
+            FROM employees
+            WHERE perfect_attendance IS NOT NULL AND date(perfect_attendance) <= date(?)
+            ORDER BY last_name, first_name;
+        """, (as_of_iso,)).fetchall()
+
+        if not rows:
+            from tkinter import messagebox
+            messagebox.showinfo("Perfect Attendance", "No dates due as of today.")
+            return
+
+        log_rows = []
+        for r in rows:
+            emp_id, ln, fn, pt, d = r["employee_id"], r["last_name"], r["first_name"], float(r["pt"] or 0.0), r["d"]
+            due_d = datetime.strptime(d, "%Y-%m-%d").date()
+            next_d = three_months_then_first(due_d)
+            # advance
+            self.conn.execute("UPDATE employees SET perfect_attendance=? WHERE employee_id=?",
+                              (next_d.isoformat(), emp_id))
+            # CSV row in unified schema
+            note = f"Next: {self._us(next_d.isoformat())}"
+            log_rows.append([emp_id, ln, fn, d, "0.0", "Perfect Attendance Advanced", note, f"{pt:.1f}", ""])
+
+        self.conn.commit()
+
+        import csv
+        path = self._save_csv("apply_perfect_attendance")
+        with open(path, "w", newline="", encoding="utf-8") as f:
+            w = csv.writer(f); w.writerow(self._csv_header())
+            for row in log_rows:
+                row[3] = self._us(row[3])  # Point Date column (current perfect date)
+                w.writerow(row)
+
+        try:
+            self.app.set_status(f"Perfect attendance updated — {len(log_rows)} record(s).", ok=True)
+            self.app._refresh_all()
+        except Exception:
+            pass
+
+    # =========================
+    # 6) Preview YTD Rolloffs (CSV) — no DB changes
+    #    Uses your policy: points older than 1 year are eligible.
+    # =========================
+    def cmd_preview_ytd_rolloffs(self):
+        if not self._confirm("Preview YTD Rolloffs",
+                             "Export a CSV of points eligible for YTD rolloff (no changes)?"):
+            return
+
+        cutoff = (date.today().replace(year=date.today().year - 1)).isoformat()
+        rows = self.conn.execute("""
+            SELECT e.employee_id, e.last_name, e.first_name,
+                   p.point_date, COALESCE(p.points,0.0) AS pts,
+                   COALESCE(e.point_total,0.0) AS pt
+            FROM points_history p
+            JOIN employees e ON e.employee_id = p.employee_id
+            WHERE p.points > 0 AND date(p.point_date) <= date(?)
+            ORDER BY e.employee_id, p.point_date, p.id;
+        """, (cutoff,)).fetchall()
+
+        import csv
+        path = self._save_csv("preview_ytd_rolloffs")
+        with open(path, "w", newline="", encoding="utf-8") as f:
+            w = csv.writer(f); w.writerow(self._csv_header())
+            for r in rows:
+                w.writerow([
+                    r["employee_id"], r["last_name"], r["first_name"],
+                    self._us(r["point_date"]),
+                    f"-{float(r['pts']):.1f}",     # shows what would be removed
+                    "YTD Rolloff — Eligible",
+                    "",
+                    f"{float(r['pt']):.1f}",
+                    ""
+                ])
+        try: self.app.set_status(f"Exported: {os.path.basename(path)}", ok=True)
+        except Exception: pass
+
+    # =========================
+    # 7) Remove YTD Points — writes DB via your existing policy helper
+    #    (we rely on apply_ytd_rolloffs(conn, dry_run=False) to do the math)
+    # =========================
+    def cmd_remove_ytd_points(self):
+        if not self._confirm("Remove YTD Points",
+                             "Proceed to remove points older than one year and export an audit CSV? This will modify employee totals."):
+            return
+        try:
+            rows = apply_ytd_rolloffs(self.conn, dry_run=False)  # expected: list[(emp_id, removed_pts)]
+        except Exception as e:
+            from tkinter import messagebox
+            messagebox.showerror("YTD Rolloffs", f"Error: {e}")
+            return
+
+        if not rows:
+            from tkinter import messagebox
+            messagebox.showinfo("YTD Rolloffs", "No YTD rolloffs applied (none eligible or already processed).")
+            return
+
+        today_iso = date.today().isoformat()
+        # enrich with names and updated totals
+        data = []
+        for emp_id, pts in rows:
+            rec = self.conn.execute("""
+                SELECT last_name, first_name, COALESCE(point_total,0.0) AS pt
+                FROM employees WHERE employee_id=?;
+            """, (emp_id,)).fetchone()
+            if rec:
+                data.append([
+                    emp_id, rec["last_name"], rec["first_name"],
+                    today_iso, f"-{float(pts):.1f}",
+                    "YTD Rolloff", "", f"{float(rec['pt']):.1f}", ""
+                ])
+
+        import csv
+        path = self._save_csv("apply_ytd_rolloffs")
+        with open(path, "w", newline="", encoding="utf-8") as f:
+            w = csv.writer(f); w.writerow(self._csv_header())
+            for row in data:
+                row[3] = self._us(row[3])
+                w.writerow(row)
+
+        try:
+            self.app.set_status(f"YTD rolloffs applied — {len(data)} employee(s).", ok=True)
+            self.app._refresh_all()
+        except Exception:
+            pass
 
     def _import_point_history_csv(self):
         """
