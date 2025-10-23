@@ -1842,15 +1842,20 @@ class ReportsFrame(ttk.Frame):
         with open(path, "w", newline="", encoding="utf-8") as f:
             w = csv.writer(f); w.writerow(self._csv_header())
             for r in rows:
+                current = float(r["pt"] or 0.0)
+                projected = max(0.0, round(current - 1.0, 1))  # show post-rolloff total
+
                 w.writerow([
                     r["employee_id"], r["last_name"], r["first_name"],
                     self._us(r["rolloff_date"]),
-                    "0.0",
-                    "Upcoming 2-Month Rolloff",
-                    "",
-                    f"{float(r['pt']):.1f}",
+                    "-1.0",                    # Point column = preview of removal
+                    "2 Month Rolloff",         # Reason column
+                    "",                        # Note (left blank)
+                    f"{projected:.1f}",        # Point Total = projected after -1.0
                     ""
                 ])
+
+
         try: self.app.set_status(f"Exported: {os.path.basename(path)}", ok=True)
         except Exception: pass
 
