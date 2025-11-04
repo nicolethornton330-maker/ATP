@@ -141,7 +141,7 @@ def two_months_then_first(d: date) -> date:
     return first_of_next_month(add_months(d, 2))
 
 def three_months_then_first(d: date) -> date:
-    return first_of_next_month(add_months(d, 3))
+    return first_of_next_month(add_months(d, 2))
 
 def step_next_due(current_due: date, perfect_date: date) -> date:
     """
@@ -307,6 +307,43 @@ class SortableTree:
     def bind_headings(self, *_):
         for cid in self.cols:
             self.tree.heading(cid, command=lambda c=cid: self.sort_by_column(c))
+    def _sort_key(self, v):
+        """
+        Normalize values so mixed types (datetime/str/number/blank) sort without errors.
+        Returns a tuple (type_rank, value) so different kinds are comparable.
+        Rank order: dates (0), numbers (1), strings (2), blanks (3).
+        """
+        from datetime import datetime, date
+
+        if v is None:
+            return (3, "")
+
+        # Already a date/datetime
+        if isinstance(v, (datetime, date)):
+            d = v.date() if isinstance(v, datetime) else v
+            return (0, d.toordinal())
+
+        s = str(v).strip()
+        if not s:
+            return (3, "")
+
+        # Try to parse as a date in common formats
+        for fmt in ("%Y-%m-%d", "%m-%d-%Y", "%m/%d/%Y", "%Y/%m/%d"):
+            try:
+                d = datetime.strptime(s, fmt).date()
+                return (0, d.toordinal())
+            except Exception:
+                pass
+
+        # Try to parse as number
+        try:
+            n = float(s.replace(",", ""))
+            return (1, n)
+        except Exception:
+            pass
+
+        # Fallback: lowercase string
+        return (2, s.lower())
 
     def sort_by_column(self, col):
         data = []
@@ -325,7 +362,7 @@ class SortableTree:
                     return str(v).lower()
 
         desc = not self._sort_desc[col]
-        data.sort(key=lambda item: coerce(item[1][idx]), reverse=desc)
+        data.sort(key=lambda item: self._sort_key(item[1][idx]), reverse=desc)
         self._sort_desc[col] = desc
 
         for i, (iid, _) in enumerate(data):
@@ -1754,7 +1791,7 @@ class ReportsFrame(ttk.Frame):
             # Helpers (add these methods to ReportsFrame)
             # =========================
     def _csv_header(self):
-        return ["Employee ID","Last Name","First Name",
+        return ["Employee #","Last Name","First Name",
                 "Point Date","Point","Reason","Note","Point Total","Flag Code"]
 
     def _confirm(self, title, message):
@@ -1767,6 +1804,30 @@ class ReportsFrame(ttk.Frame):
             return ymd_to_us(ymd)
         except Exception:
             return ymd or ""
+            
+    def _add_months_first(self, d, months):
+        """Return the first day of the month 'months' after date d (safe across years)."""
+        from datetime import date
+        m_total = (d.month - 1) + months
+        y = d.year + (m_total // 12)
+        m = (m_total % 12) + 1
+        return date(y, m, 1)
+        
+    def _recalc_employee_totals(self):
+        """
+        Rebuild employees.points_total from points_history (SQLite-safe).
+        If you don't store points_total in employees, skip this and compute in export.
+        """
+        cur = self.conn.cursor()
+        cur.execute("""
+            UPDATE employees
+            SET points_total = COALESCE((
+                SELECT ROUND(SUM(ph.point), 2)
+                FROM points_history ph
+                WHERE ph.employee_id = employees.id
+            ), 0)
+        """)
+        self.conn.commit()
 
     def _save_csv(self, prefix: str) -> str:
         return self._default_save_path(prefix)
@@ -1995,14 +2056,19 @@ class ReportsFrame(ttk.Frame):
                              "Export current perfect-attendance dates and advance them? This updates employee records."):
             return
 
-        from datetime import datetime
-        as_of_iso = date.today().isoformat()
+        from datetime import date, datetime
+        import csv, os
+
+        today = date.today()
+        as_of_iso = today.isoformat()
+
         rows = self.conn.execute("""
             SELECT employee_id,last_name,first_name,
                    COALESCE(point_total,0.0) AS pt,
                    NULLIF(perfect_attendance,'') AS d
             FROM employees
-            WHERE perfect_attendance IS NOT NULL AND date(perfect_attendance) <= date(?)
+            WHERE perfect_attendance IS NOT NULL
+              AND date(perfect_attendance) <= date(?)
             ORDER BY last_name, first_name;
         """, (as_of_iso,)).fetchall()
 
@@ -2012,50 +2078,78 @@ class ReportsFrame(ttk.Frame):
             return
 
         log_rows = []
-        for r in rows:
-            emp_id, ln, fn, pt, d = r["employee_id"], r["last_name"], r["first_name"], float(r["pt"] or 0.0), r["d"]
-            due_d = datetime.strptime(d, "%Y-%m-%d").date()
-            next_d = three_months_then_first(due_d)
-            # advance
-            self.conn.execute("UPDATE employees SET perfect_attendance=? WHERE employee_id=?",
-                              (next_d.isoformat(), emp_id))
-            # CSV row in unified schema
-            note = f"Next: {self._us(next_d.isoformat())}"
-            log_rows.append([emp_id, ln, fn, d, "0.0", "Perfect Attendance Advanced", note, f"{pt:.1f}", ""])
 
-        self.conn.commit()
+        with self.conn:
+            for r in rows:
+                emp_id = r["employee_id"]
+                ln, fn = r["last_name"], r["first_name"]
+                pt = float(r["pt"] or 0.0)
+                d  = r["d"]  # ISO string
 
-        import csv
+                # current due date
+                due_d = datetime.strptime(d, "%Y-%m-%d").date()
+
+                # advance by three months to the 1st, repeat if still <= today
+                next_d = self._add_months_first(due_d, 3)
+                while next_d <= today:
+                    next_d = self._add_months_first(next_d, 3)
+
+                # write back the new next date
+                self.conn.execute(
+                    "UPDATE employees SET perfect_attendance=? WHERE employee_id=?",
+                    (next_d.isoformat(), emp_id)
+                )
+
+                # CSV row in your unified schema
+                note = f"Next: {self._us(next_d.isoformat())}"
+                log_rows.append([emp_id, ln, fn, d, "0.0",
+                                 "Perfect Attendance Advanced", note, f"{pt:.1f}", ""])
+
+        # commit done by context manager; write CSV
         path = self._save_csv("apply_perfect_attendance")
         with open(path, "w", newline="", encoding="utf-8") as f:
             w = csv.writer(f); w.writerow(self._csv_header())
             for row in log_rows:
-                row[3] = self._us(row[3])  # Point Date column (current perfect date)
+                row[3] = self._us(row[3])  # display due date in US format
                 w.writerow(row)
 
         try:
-            self.app.set_status(f"Perfect attendance updated — {len(log_rows)} record(s).", ok=True)
-            self.app._refresh_all()
+            self.app.set_status(f"Perfect attendance updated — {len(log_rows)} record(s). Saved: {os.path.basename(path)}", ok=True)
+            if hasattr(self.app, "_refresh_all"): self.app._refresh_all()
+            if hasattr(self, "_refresh_table"): self._refresh_table()
         except Exception:
             pass
 
+
     # =========================
     # 6) Preview YTD Rolloffs (CSV) — no DB changes
-    #    Uses your policy: points older than 1 year are eligible.
+    #    Reads "current total" live from points_history for accuracy.
     # =========================
     def cmd_preview_ytd_rolloffs(self):
+        from datetime import date
         if not self._confirm("Preview YTD Rolloffs",
                              "Export a CSV of points eligible for YTD rolloff (no changes)?"):
             return
 
         cutoff = (date.today().replace(year=date.today().year - 1)).isoformat()
+
+        # Pull live totals via an aggregate subquery/join so preview is always correct
         rows = self.conn.execute("""
-            SELECT e.employee_id, e.last_name, e.first_name,
-                   p.point_date, COALESCE(p.points,0.0) AS pts,
-                   COALESCE(e.point_total,0.0) AS pt
+            SELECT e.employee_id,
+                   e.last_name,
+                   e.first_name,
+                   p.point_date,
+                   COALESCE(p.points, 0.0) AS pts,
+                   ROUND(MAX(0.0, COALESCE(t.total_points, 0.0)), 1) AS pt
             FROM points_history p
             JOIN employees e ON e.employee_id = p.employee_id
-            WHERE p.points > 0 AND date(p.point_date) <= date(?)
+            LEFT JOIN (
+                SELECT employee_id, SUM(points) AS total_points
+                FROM points_history
+                GROUP BY employee_id
+            ) t ON t.employee_id = e.employee_id
+            WHERE p.points > 0
+              AND date(p.point_date) <= date(?)
             ORDER BY e.employee_id, p.point_date, p.id;
         """, (cutoff,)).fetchall()
 
@@ -2070,60 +2164,140 @@ class ReportsFrame(ttk.Frame):
                     f"-{float(r['pts']):.1f}",     # shows what would be removed
                     "YTD Rolloff — Eligible",
                     "",
-                    f"{float(r['pt']):.1f}",
+                    f"{float(r['pt']):.1f}",       # live current total
                     ""
                 ])
-        try: self.app.set_status(f"Exported: {os.path.basename(path)}", ok=True)
-        except Exception: pass
+        try:
+            import os
+            self.app.set_status(f"Exported: {os.path.basename(path)}", ok=True)
+        except Exception:
+            pass
+
 
     # =========================
-    # 7) Remove YTD Points — writes DB via your existing policy helper
-    #    (we rely on apply_ytd_rolloffs(conn, dry_run=False) to do the math)
+    # 7) Remove YTD Points — apply, commit, recalc totals, refresh GUI, export with NEW totals
+    #    We rely on apply_ytd_rolloffs(conn, dry_run=False) to remove/adjust history.
     # =========================
     def cmd_remove_ytd_points(self):
-        if not self._confirm("Remove YTD Points",
-                             "Proceed to remove points older than one year and export an audit CSV? This will modify employee totals."):
-            return
-        try:
-            rows = apply_ytd_rolloffs(self.conn, dry_run=False)  # expected: list[(emp_id, removed_pts)]
-        except Exception as e:
-            from tkinter import messagebox
-            messagebox.showerror("YTD Rolloffs", f"Error: {e}")
+        """
+        Remove the points accrued in the SAME MONTH of the PREVIOUS YEAR.
+        - Sums POSITIVE points within that month (per employee).
+        - Removes up to current_total (never below 0.0).
+        - Writes one aggregated negative entry for audit/history.
+        - Updates employees.point_total, exports CSV, and refreshes UI.
+        """
+        from datetime import date
+
+        if not self._confirm(
+            "Remove YTD Points",
+            "Proceed to remove points earned in the same month last year and export an audit CSV? This will modify employee totals."
+        ):
             return
 
-        if not rows:
-            from tkinter import messagebox
-            messagebox.showinfo("YTD Rolloffs", "No YTD rolloffs applied (none eligible or already processed).")
-            return
+        # --- Month window: [start_last_year_month, first_day_of_next_month_last_year)
+        today = date.today()
+        start = date(today.year - 1, today.month, 1)
+        if today.month == 12:
+            end = date(today.year, 1, 1)              # next month after Dec last year = Jan current year
+        else:
+            end = date(today.year - 1, today.month + 1, 1)
 
-        today_iso = date.today().isoformat()
-        # enrich with names and updated totals
-        data = []
-        for emp_id, pts in rows:
-            rec = self.conn.execute("""
-                SELECT last_name, first_name, COALESCE(point_total,0.0) AS pt
-                FROM employees WHERE employee_id=?;
-            """, (emp_id,)).fetchone()
-            if rec:
-                data.append([
-                    emp_id, rec["last_name"], rec["first_name"],
-                    today_iso, f"-{float(pts):.1f}",
-                    "YTD Rolloff", "", f"{float(rec['pt']):.1f}", ""
+        pretty_window = start.strftime("%b %Y")        # e.g., "Nov 2024"
+        today_iso = today.isoformat()
+
+        # Gather eligible (sum of positive points in the target month) and live current totals
+        rows = self.conn.execute("""
+            WITH eligible AS (
+                SELECT employee_id, ROUND(SUM(points), 1) AS eligible
+                FROM points_history
+                WHERE points > 0
+                  AND date(point_date) >= date(?)
+                  AND date(point_date) <  date(?)
+                GROUP BY employee_id
+            ),
+            totals AS (
+                SELECT employee_id, ROUND(COALESCE(SUM(points), 0.0), 1) AS current_total
+                FROM points_history
+                GROUP BY employee_id
+            )
+            SELECT e.employee_id,
+                   e.last_name,
+                   e.first_name,
+                   COALESCE(t.current_total, 0.0) AS current_total,
+                   COALESCE(el.eligible, 0.0)     AS eligible
+            FROM employees e
+            JOIN eligible el ON el.employee_id = e.employee_id
+            LEFT JOIN totals  t ON t.employee_id = e.employee_id
+            WHERE el.eligible > 0
+            ORDER BY e.employee_id;
+        """, (start.isoformat(), end.isoformat())).fetchall()
+
+        affected = 0
+        log_rows = []
+
+        # Apply removals with a hard floor at 0.0
+        with self.conn:
+            for r in rows:
+                emp_id = r["employee_id"]
+                ln, fn = r["last_name"], r["first_name"]
+                current_total = float(r["current_total"] or 0.0)
+                eligible      = float(r["eligible"] or 0.0)
+
+                if current_total <= 0.0:
+                    continue
+
+                remove_amt = round(min(eligible, current_total), 1)
+                if remove_amt <= 0.0:
+                    continue
+
+                # Single aggregated negative entry for audit/history
+                self.conn.execute("""
+                    INSERT INTO points_history
+                        (employee_id, point_date, points, reason, note, flag_code)
+                    VALUES
+                        (?, ?, ?, ?, '', 'YTD')
+                """, (emp_id, today_iso, -remove_amt, f"YTD Rolloff ({pretty_window})"))
+
+                new_total = round(current_total - remove_amt, 1)
+                if new_total < 0.0:  # safety net; should not trigger
+                    new_total = 0.0
+
+                self.conn.execute(
+                    "UPDATE employees SET point_total=? WHERE employee_id=?",
+                    (new_total, emp_id)
+                )
+
+                affected += 1
+                log_rows.append([
+                    emp_id, ln, fn, today_iso,
+                    f"-{remove_amt:.1f}",
+                    f"YTD Rolloff ({pretty_window})",
+                    "",
+                    f"{new_total:.1f}",
+                    ""
                 ])
 
-        import csv
+        # Export audit CSV
+        import csv, os
         path = self._save_csv("apply_ytd_rolloffs")
         with open(path, "w", newline="", encoding="utf-8") as f:
             w = csv.writer(f); w.writerow(self._csv_header())
-            for row in data:
-                row[3] = self._us(row[3])
+            for row in log_rows:
+                row[3] = self._us(row[3])  # ISO -> US display
                 w.writerow(row)
 
+        # Notify + refresh GUI
+        from tkinter import messagebox
+        messagebox.showinfo(
+            "YTD Rolloffs",
+            f"Applied to {affected} employee(s) for {pretty_window}.\nSaved: {os.path.basename(path)}"
+        )
         try:
-            self.app.set_status(f"YTD rolloffs applied — {len(data)} employee(s).", ok=True)
-            self.app._refresh_all()
+            if hasattr(self.app, "_refresh_all"): self.app._refresh_all()
+            if hasattr(self, "_refresh_table"): self._refresh_table()
         except Exception:
             pass
+
 
     def _preview_point_history_csv(self):
         """
@@ -2346,11 +2520,17 @@ class ReportsFrame(ttk.Frame):
 
             self.conn.execute("""
                 UPDATE employees
-                   SET point_total = ?,
-                       last_point_date = COALESCE(?, last_point_date)
-                 WHERE employee_id = ?
-            """, (round(float(total), 2), last_pos, emp_id))
-        self.conn.commit()
+                SET point_total = ROUND(
+                    MAX(0.0, COALESCE((
+                        SELECT SUM(ph.points)
+                        FROM points_history ph
+                        WHERE ph.employee_id = employees.employee_id
+                    ), 0.0)),
+                    1
+                )
+            """)
+            self.conn.commit()
+
 
     def _default_save_path(self, prefix: str) -> str:
         """Save to program directory."""
