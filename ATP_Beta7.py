@@ -19,8 +19,10 @@ Status:
 
 import os
 import csv
+import sys
 import sqlite3
 import calendar
+from pathlib import Path
 from datetime import datetime, date, timedelta
 from collections import deque
 import tkinter as tk
@@ -28,7 +30,9 @@ import tkinter.font as tkfont
 from tkinter import ttk, messagebox
 from PIL import Image, ImageTk
 from PIL import Image, ImageTk
-from tkinter import ttk, messagebox, filedialog
+from tkinter import ttk, messagebox, filedialog, PhotoImage
+import tkinter
+
 # ----------------------------
 # Colors & theme
 # ----------------------------
@@ -52,6 +56,21 @@ STATUS_COLORS = {
 DB_PATH      = "employeeroster.db"
 MAX_UNDO_HISTORY = 20  # Keep last 20 undo steps
 
+def resource_path(rel):
+    base = Path(getattr(sys, "_MEIPASS", Path(__file__).parent))
+    return base / rel
+
+def set_app_icon(root: tk.Tk):
+    try:
+        root.iconbitmap(default=str(resource_path("assets/app.ico")))
+    except Exception:
+        pass
+    try:
+        img = PhotoImage(file=str(resource_path("assets/logo.png")))
+        root.iconphoto(True, img)
+        root._icon_img_ref = img   # keep reference
+    except Exception:
+        pass
 # ----------------------------
 # Date helpers (US display: MM-DD-YYYY)
 # ----------------------------
@@ -3035,8 +3054,20 @@ class ReportsFrame(ttk.Frame):
 class App(tk.Tk):
     def __init__(self):
         super().__init__()
+        set_app_icon(self) 
+        
+        # Fixed startup size (e.g., 1280x820) and centered
+        W, H = 1280, 820
+        sw, sh = self.winfo_screenwidth(), self.winfo_screenheight()
+        x = (sw - W) // 2
+        y = (sh - H) // 2
+        self.geometry(f"{W}x{H}+{x}+{y}")
+
+        # Optional: enforce a minimum so it can't collapse too small
+        self.minsize(1000, 680)
+
+
         self.title("Attendance Tracker - ATP Beta7")
-        self.geometry("1150x780")
         self.configure(bg=BG_MAIN)
 
         # Initialize status timer variable early
@@ -3137,15 +3168,22 @@ class App(tk.Tk):
         
         logo_box = ttk.Frame(left, padding=(6,6,6,6), style="Pane.TFrame")
         logo_box.pack(side="top", anchor="w")
+        
         try:
-            logo_path = os.path.join(os.path.dirname(__file__), "logo.png")
-            img = Image.open(logo_path)
-            img = img.resize((200, 200), Image.LANCZOS)  # adjust as needed
-            self.logo_image = ImageTk.PhotoImage(img)
-            ttk.Label(logo_box, image=self.logo_image).pack(padx=12, pady=(10,2))
+            logo_path = resource_path("assets/logo.png")
+            # prefer Pillow if available for clean resize
+            try:
+                from PIL import Image, ImageTk
+                img = Image.open(logo_path)
+                img = img.resize((200, 200), Image.LANCZOS)
+                self.logo_image = ImageTk.PhotoImage(img)
+            except Exception:
+                # fallback: load directly via Tk
+                self.logo_image = PhotoImage(file=str(logo_path))
+
+            ttk.Label(logo_box, image=self.logo_image).pack(padx=12, pady=(10, 2))
         except Exception as e:
-            # Fallback text if logo not found
-            ttk.Label(logo_box, text="ATP", font=("Segoe UI Semibold", 28)).pack(padx=12, pady=(10,2))
+            ttk.Label(logo_box, text="ATP", font=("Segoe UI Semibold", 28)).pack(padx=12, pady=(10, 2))
             print(f"⚠ Could not load logo: {e}")
 
         # Subtitle beneath logo
@@ -3156,11 +3194,6 @@ class App(tk.Tk):
 
         nb = ttk.Notebook(right)
         nb.pack(fill="both", expand=True)
-
-        # Adjust window size to fit contents
-        self.update_idletasks()
-        self.geometry(f"{self.winfo_reqwidth()}x{self.winfo_reqheight()}")
-
 
         self.tab_dashboard = DashboardFrame(nb, self.conn, self._refresh_all, self)
         self.tab_employees = EmployeesFrame(nb, self.conn, self._refresh_all, self)
@@ -3173,8 +3206,7 @@ class App(tk.Tk):
         nb.add(self.tab_reports, text="Reports")
 
         self._refresh_all()
-        self.update_idletasks()
-        self.geometry(f"{self.winfo_reqwidth()}x{self.winfo_reqheight()}")
+        
         # Footer / Status bar
         self.status_var = tk.StringVar(value="Ready")
         footer = ttk.Frame(self, padding=(10,0,10,10))
